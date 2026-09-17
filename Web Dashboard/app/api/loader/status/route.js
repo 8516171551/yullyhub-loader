@@ -10,7 +10,8 @@ import { seen } from '../../../../lib/command-queue.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ONLINE_TTL_MS = 15 * 1000;
+// Match the queue's TTL — 60s. See lib/command-queue.js for why.
+const ONLINE_TTL_MS = 60 * 1000;
 
 export async function GET(request) {
     const url = new URL(request.url);

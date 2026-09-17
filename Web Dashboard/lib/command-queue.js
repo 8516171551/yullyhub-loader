@@ -14,7 +14,11 @@ export const queue = globalThis.__yh_loader_queue;
 /** @type {Map<string, { lastSeen: number, info: any }>} */
 export const seen  = globalThis.__yh_loader_seen;
 
-const ONLINE_TTL_MS = 15 * 1000; // if a loader hasn't polled in 15s, treat as offline
+// Bumped from 15s to 60s so a single cold-instance miss (Vercel routing a
+// status probe to a different lambda whose `seen` map is empty) doesn't
+// flap the topbar. The loader polls every ~3s, so even 3 missed polls
+// still marks the loader online.
+const ONLINE_TTL_MS = 60 * 1000;
 
 export function markSeen(loaderId, info) {
     if (!loaderId) return;
