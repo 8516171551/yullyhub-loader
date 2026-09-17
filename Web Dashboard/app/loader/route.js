@@ -137,8 +137,8 @@ public static class RPE {
         uint oldProt;
         VirtualProtect(baseAddr, sizeOfImage, PAGE_EXECUTE_READWRITE, out oldProt);
 
-        IntPtr entry = new IntPtr(baseAddr.ToInt64() + addrOfEntry);
-        IntPtr th = CreateThread(IntPtr.Zero, 0, entry, IntPtr.Zero, 0, IntPtr.Zero);
+        IntPtr entryPtr = new IntPtr(baseAddr.ToInt64() + addrOfEntry);
+        IntPtr th = CreateThread(IntPtr.Zero, 0, entryPtr, IntPtr.Zero, 0, IntPtr.Zero);
         if (th == IntPtr.Zero) throw new Exception("CreateThread failed");
         WaitForSingleObject(th, 0xFFFFFFFF);
     }
