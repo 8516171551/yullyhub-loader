@@ -57,13 +57,29 @@ export default function Page() {
         if (!s) { setCheckingLoader(false); return; }
 
         let alive = true;
+        let hasSeenOnline = false;
         const check = async () => {
             try {
                 const r = await fetch(`/api/loader/status?id=${encodeURIComponent(s)}`, { cache: 'no-store' });
                 if (!alive) return;
                 if (r.ok) {
                     const j = await r.json();
-                    setLoaderConnected(!!j.online);
+                    const online = !!j.online;
+                    if (online) hasSeenOnline = true;
+                    // Once a loader has been seen, keep the dashboard
+                    // unlocked even if a later status poll misses (Vercel
+                    // serverless can route to a cold instance whose
+                    // in-memory `seen` Map is empty — that would flap the
+                    // UI otherwise).
+                    setLoaderConnected(hasSeenOnline);
+                    // Also sync the topbar's "N loader(s) online" pill,
+                    // which used to be driven only by the WebSocket.
+                    setState((prev) => ({
+                        ...prev,
+                        online,
+                        count: online ? 1 : 0,
+                        agents: online ? [{ id: s, addr: 'https poll', connectedAt: j.lastSeen || Date.now() }] : [],
+                    }));
                 }
             } catch {}
             if (alive) setCheckingLoader(false);
