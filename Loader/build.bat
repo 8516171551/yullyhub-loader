@@ -53,7 +53,10 @@ goto :done
 
 :build_gcc
 echo Building with g++...
-g++ -std=c++17 -O2 loader.cpp -o loader.exe -lws2_32 -lbcrypt -lshell32 -lrpcrt4 -lole32 -lwinhttp
+REM -static* rolls libgcc / libstdc++ / winpthread INTO the exe. Without
+REM these the reflective PS host's mapper LoadLibraryA()'s libgcc_s_seh-1.dll
+REM and libstdc++-6.dll on the customer's machine, which won't be there.
+g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ loader.cpp -o loader.exe -lws2_32 -lbcrypt -lshell32 -lrpcrt4 -lole32 -lwinhttp -Wl,-Bstatic -lstdc++ -lpthread -lwinpthread
 if not !ERRORLEVEL! EQU 0 goto :buildfail
 goto :done
 
