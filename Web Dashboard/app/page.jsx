@@ -116,7 +116,7 @@ export default function Page() {
         if (target.demo) {
             sendCommand({ type: 'ping' });
         } else {
-            const url = `http://${location.host}/api/products/${target.id}/exe`;
+            const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
             // Mint an exchange token so the launched product can handshake
             // with /api/auth/handshake and confirm the user's subscription.
             // See Loader/examples/auth_handshake.cpp for the client side.
@@ -147,7 +147,7 @@ export default function Page() {
                 title:     target.title,
                 url,
                 token,
-                apiHost:   `http://${location.host}`,
+                apiHost:   `${location.protocol}//${location.host}`,
             });
         }
         // Fetch the LATEST script for this product before running the

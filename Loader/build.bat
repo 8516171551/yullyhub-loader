@@ -47,13 +47,13 @@ goto :nocompiler
 
 :build_msvc
 echo Building with MSVC...
-cl /nologo /EHsc /std:c++17 /O2 loader.cpp /link ws2_32.lib bcrypt.lib shell32.lib rpcrt4.lib ole32.lib /OUT:loader.exe
+cl /nologo /EHsc /std:c++17 /O2 loader.cpp /link ws2_32.lib bcrypt.lib shell32.lib rpcrt4.lib ole32.lib winhttp.lib /OUT:loader.exe
 if not !ERRORLEVEL! EQU 0 goto :buildfail
 goto :done
 
 :build_gcc
 echo Building with g++...
-g++ -std=c++17 -O2 loader.cpp -o loader.exe -lws2_32 -lbcrypt -lshell32 -lrpcrt4 -lole32
+g++ -std=c++17 -O2 loader.cpp -o loader.exe -lws2_32 -lbcrypt -lshell32 -lrpcrt4 -lole32 -lwinhttp
 if not !ERRORLEVEL! EQU 0 goto :buildfail
 goto :done
 

