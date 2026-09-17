@@ -49,6 +49,53 @@ export default function Page() {
     const [loaderConnected, setLoaderConnected] = useState(false);
     const [checkingLoader, setCheckingLoader] = useState(true);
 
+    // Kiosk-mode key + context blocking. Runs always (landing + dashboard).
+    useEffect(() => {
+        const blockKey = (e) => {
+            const k = (e.key || '').toLowerCase();
+            const ctrl  = e.ctrlKey  || e.metaKey;
+            const shift = e.shiftKey;
+            const alt   = e.altKey;
+
+            const isBad =
+                k === 'f5'      ||   // reload
+                k === 'f11'     ||   // fullscreen toggle
+                k === 'f12'     ||   // devtools
+                k === 'escape'  ||   // leave fullscreen / dismiss
+                (ctrl && k === 'r')                  ||   // reload
+                (ctrl && k === 'w')                  ||   // close tab
+                (ctrl && k === 't')                  ||   // new tab
+                (ctrl && k === 'n')                  ||   // new window
+                (ctrl && k === 'u')                  ||   // view source
+                (ctrl && k === 's')                  ||   // save page
+                (ctrl && k === 'p')                  ||   // print
+                (ctrl && k === 'j')                  ||   // downloads
+                (ctrl && k === 'h')                  ||   // history
+                (ctrl && shift && (k === 'i' || k === 'j' || k === 'c' || k === 'r')) || // devtools / hard reload
+                (alt  && (k === 'arrowleft' || k === 'arrowright'));   // browser back/forward
+
+            if (isBad) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                return false;
+            }
+        };
+        const blockCtx = (e) => { e.preventDefault(); e.stopPropagation(); return false; };
+        // capture-phase so we intercept BEFORE any react-router / element handler
+        document.addEventListener('keydown', blockKey, true);
+        document.addEventListener('contextmenu', blockCtx, true);
+        // pin the history so browser back can't leave the app
+        try { window.history.pushState(null, '', window.location.href); } catch {}
+        const popBlock = () => { try { window.history.pushState(null, '', window.location.href); } catch {} };
+        window.addEventListener('popstate', popBlock);
+        return () => {
+            document.removeEventListener('keydown', blockKey, true);
+            document.removeEventListener('contextmenu', blockCtx, true);
+            window.removeEventListener('popstate', popBlock);
+        };
+    }, []);
+
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const url = new URL(window.location.href);

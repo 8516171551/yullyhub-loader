@@ -1499,18 +1499,40 @@ int main(int argc, char** argv) {
         }
         url += "/?session=" + g_loader_id;
 
-        const char* browsers[] = {
-            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-            nullptr
+        struct BrowserSpec { const char* path; const char* privateFlag; };
+        BrowserSpec browsers[] = {
+            {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",         "--incognito"},
+            {"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",   "--incognito"},
+            {"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  "--inprivate"},
+            {"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",        "--inprivate"},
+            {nullptr, nullptr}
         };
+
+        // Random empty user-data-dir under %TEMP% — guarantees no
+        // existing session, no history, no extensions carry over. The
+        // directory gets nuked automatically on next reboot's %TEMP%
+        // sweep. Combined with --incognito / --inprivate the profile
+        // is doubly-clean.
+        char tempDir[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempDir);
+        std::string dataDir = std::string(tempDir) + "yh_" + g_loader_id.substr(0, 12);
+        CreateDirectoryA(dataDir.c_str(), NULL);
+
         bool spawned = false;
-        for (int i = 0; browsers[i]; i++) {
-            if (GetFileAttributesA(browsers[i]) == INVALID_FILE_ATTRIBUTES) continue;
-            std::string cmd = std::string("\"") + browsers[i] +
-                              "\" --start-maximized --new-window \"" + url + "\"";
+        for (int i = 0; browsers[i].path; i++) {
+            if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
+            // --app=<url> strips the browser chrome (address bar, tabs)
+            // and shows the page as an application window — still has
+            // the native title bar with min/max/close so the customer
+            // can exit via the X. Combined with --start-maximized this
+            // opens as a big bordered window that "just looks like an app".
+            std::string cmd = std::string("\"") + browsers[i].path + "\""
+                            + " " + browsers[i].privateFlag
+                            + " --user-data-dir=\"" + dataDir + "\""
+                            + " --no-first-run --no-default-browser-check"
+                            + " --disable-features=Translate,MediaRouter"
+                            + " --start-maximized"
+                            + " --app=\"" + url + "\"";
             STARTUPINFOA si{}; si.cb = sizeof(si);
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = SW_SHOWMAXIMIZED;
@@ -1519,14 +1541,14 @@ int main(int argc, char** argv) {
                                CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS,
                                NULL, NULL, &si, &pi)) {
                 CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-                std::cout << "[loader] opened dashboard in browser (maximized)" << std::endl;
+                std::cout << "[loader] opened dashboard (private, --app, maximized) using "
+                          << browsers[i].path << std::endl;
                 spawned = true; break;
             }
         }
         if (!spawned) {
-            // Fallback — default browser via shell association
             ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWMAXIMIZED);
-            std::cout << "[loader] opened dashboard in default browser" << std::endl;
+            std::cout << "[loader] opened dashboard in default browser (fallback)" << std::endl;
         }
     }
 
