@@ -1,0 +1,19 @@
+# Node
+node_modules/
+.next/
+*.log
+npm-debug.log*
+.env
+.env.local
+.vercel/
+
+# Build artifacts
+Loader/*.obj
+Loader/*.pdb
+
+# Uploads (dashboard products) — server-side data, not source
+Web Dashboard/uploads/
+
+# OS junk
+Thumbs.db
+.DS_Store

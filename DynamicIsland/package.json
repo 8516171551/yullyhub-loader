@@ -1,0 +1,12 @@
+{
+  "name": "yullyhub-dynamic-island",
+  "version": "1.2.0",
+  "description": "YullyHub Dynamic Island — desktop overlay for the C++ loader",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>YullyHub Dynamic Island</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* Black tint layer — solid dark body over the liquid-glass
+               refraction. The desktop still refracts through the bezel
+               band (edge-only, per Snell) while the interior stays black. */
+            --tint-color:      6, 6, 8;
+            --tint-opacity:    0.88;
+            --shadow-color:    rgba(255, 255, 255, 0.06);
+            --shadow-blur:     22px;
+            --shadow-spread:   -6px;
+
+            --outer-shadow-blur: 30px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            background: transparent !important;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: #ffffff;
+        }
+        #stage {
+            position: relative;
+            width: 780px;
+            height: 340px;
+        }
+
+        /* THE GLASS PILL — a floating rounded rectangle. Everything
+           interesting lives in ::before (tint + inset shadow) and ::after
+           (backdrop-filter reading the desktop pixels behind the window).
+           Sized/positioned from JS every frame. */
+        #glass {
+            position: absolute;
+            left: 50%;
+            top: 0;
+            transform: translateX(-50%);
+            isolation: isolate;
+            box-shadow: 0px 4px var(--outer-shadow-blur) rgba(0, 0, 0, 0.28);
+            will-change: width, height, top, border-radius;
+        }
+        #glass::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            border-radius: inherit;
+            box-shadow: inset 0 0 var(--shadow-blur) var(--shadow-spread) var(--shadow-color);
+            background-color: rgba(var(--tint-color), var(--tint-opacity));
+            pointer-events: none;
+        }
+        #glass::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            z-index: -1;
+            border-radius: inherit;
+            /* Both prefixed and unprefixed for Chromium/Electron. */
+            backdrop-filter: url(#liquid-glass-filter);
+            -webkit-backdrop-filter: url(#liquid-glass-filter);
+            isolation: isolate;
+        }
+
+        /* All text panels stack on the same anchor point, positioned per
+           frame from JS to follow the pill's animated centre. z-index 2
+           so they sit above the tint ::before layer. Every panel uses
+           flex centring so multi-line and single-line content sit dead
+           centre horizontally + vertically. */
+        .float-panel {
+            position: absolute;
+            left: 50%;
+            padding: 0 22px;
+            pointer-events: none;
+            z-index: 2;
+            opacity: 0;
+            transition: opacity 0.35s ease;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+
+        #welcome-panel {
+            font-weight: 500;
+            font-size: 17px;
+            letter-spacing: 0.4px;
+            color: #ffffff;
+            white-space: nowrap;
+        }
+
+        #idle-panel {
+            font-weight: 600;
+            font-size: 13px;
+            letter-spacing: 2.4px;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.94);
+            white-space: nowrap;
+            gap: 10px;
+        }
+        #idle-panel .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 0 6px rgba(255, 255, 255, 0.75);
+        }
+
+        #loading-panel {
+            width: 340px;
+            padding: 14px 26px 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+        .load-brand   { font-weight: 600; font-size: 15px; letter-spacing: 0.4px; }
+        .load-status  {
+            font-weight: 400; font-size: 11px; letter-spacing: 0.3px;
+            color: rgba(255, 255, 255, 0.78);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            max-width: 300px;
+        }
+        .load-track {
+            margin-top: 10px; width: 100%; height: 6px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.10);
+            overflow: hidden;
+        }
+        .load-fill {
+            height: 100%; width: 0%; border-radius: 999px;
+            background: linear-gradient(90deg, #b8342e 0%, #ff5c50 50%, #ffb8a8 100%);
+            box-shadow: 0 0 8px rgba(255, 92, 80, 0.45);
+            transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        #success-panel {
+            width: 420px;
+            padding: 22px 32px 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+        }
+        .check-wrap {
+            width: 62px; height: 62px; border-radius: 50%;
+            background: radial-gradient(circle at 30% 30%,
+                    rgba(180, 255, 220, 0.95) 0%,
+                    rgba(60, 200, 140, 0.90) 45%,
+                    rgba(30, 140, 90, 0.95) 100%);
+            display: flex; align-items: center; justify-content: center;
+            box-shadow:
+                0 0 22px rgba(80, 220, 140, 0.55),
+                inset 0 0 12px rgba(255, 255, 255, 0.35);
+        }
+        .check-wrap svg {
+            width: 30px; height: 30px;
+            stroke: #0e4a2b; stroke-width: 3.4; fill: none;
+            stroke-linecap: round; stroke-linejoin: round;
+        }
+        .success-text {
+            font-weight: 500; font-size: 15px; letter-spacing: 0.3px;
+            color: #ffffff; text-align: center;
+        }
+
+        #close-panel {
+            font-weight: 500; font-size: 14px; letter-spacing: 0.3px;
+            color: #ffffff; white-space: nowrap;
+            cursor: pointer; pointer-events: auto;
+            padding: 4px 8px; user-select: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="stage">
+        <div id="glass"></div>
+
+        <div class="float-panel" id="welcome-panel">Welcome to YullyHUB</div>
+
+        <div class="float-panel" id="idle-panel">
+            <span class="dot"></span>
+            <span>YULLY HUB</span>
+        </div>
+
+        <div class="float-panel" id="loading-panel">
+            <div class="load-brand">YullyHUB</div>
+            <div class="load-status" id="load-status">Loading product…</div>
+            <div class="load-track"><div class="load-fill" id="load-fill"></div></div>
+        </div>
+
+        <div class="float-panel" id="success-panel">
+            <div class="check-wrap">
+                <svg viewBox="0 0 24 24"><path d="M4 12.5 L10 18.5 L20 6.5"></path></svg>
+            </div>
+            <div class="success-text">Product has been loaded successfully!</div>
+        </div>
+
+        <div class="float-panel" id="close-panel">Click me to close loader</div>
+    </div>
+
+    <!-- SVG filter definitions — the actual liquid glass. `<defs>` is
+         populated at runtime from renderer.js with a precomputed
+         displacement + specular map for the current pill size. -->
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"
+         style="position:absolute;overflow:hidden"
+         color-interpolation-filters="sRGB">
+        <defs id="svg-defs"></defs>
+    </svg>
+
+    <script src="renderer.js"></script>
+</body>
+</html>
