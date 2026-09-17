@@ -95,22 +95,71 @@ export default function Page() {
         } catch {}
     };
 
-    const handleStart = async () => {
-        const target = getVisibleList()[selected];
+    // `overrideIdx` bypasses the (stale) `selected` state — pass the index
+    // of the card you actually clicked so the closure doesn't fire on the
+    // previously-selected product.
+    const handleStart = async (overrideIdx) => {
+        const list = getVisibleList();
+        const idx = (typeof overrideIdx === 'number') ? overrideIdx : safeSelected;
+        const target = list[idx];
         if (!target) return;
+        if (typeof overrideIdx === 'number') setSelected(overrideIdx);
         setScreen('inject');
         setInjectPct(0);
         setInjectStatus('Processing...');
 
         const productName = target.name || target.title || 'product';
-        islandSend({ type: 'island', action: 'start', product: productName });
 
         if (target.demo) {
             sendCommand({ type: 'ping' });
         } else {
             const url = `http://${location.host}/api/products/${target.id}/exe`;
-            sendCommand({ type: 'launch', productId: target.id, title: target.title, url });
+            // Mint an exchange token so the launched product can handshake
+            // with /api/auth/handshake and confirm the user's subscription.
+            // See Loader/examples/auth_handshake.cpp for the client side.
+            let token = null;
+            try {
+                const r = await fetch('/api/auth/exchange', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        productId: target.id,
+                        userId:    'demo-user',
+                        plan:      'lifetime',
+                    }),
+                });
+                if (r.ok) {
+                    const j = await r.json();
+                    token = j.token;
+                    pushEvent(`auth: minted token ${token.slice(0,8)}… ttl=${j.ttl_seconds}s`, 'ok');
+                } else {
+                    pushEvent(`auth: exchange failed (HTTP ${r.status})`, 'warn');
+                }
+            } catch (e) {
+                pushEvent('auth: exchange error ' + e.message, 'warn');
+            }
+            sendCommand({
+                type:      'launch',
+                productId: target.id,
+                title:     target.title,
+                url,
+                token,
+                apiHost:   `http://${location.host}`,
+            });
         }
+        // Fetch the LATEST script for this product before running the
+        // injection ring so we never miss an edit the user just made.
+        let latestScript = Array.isArray(target.script) ? target.script : null;
+        if (!target.demo) {
+            try {
+                const r = await fetch(`/api/products/${target.id}`);
+                if (r.ok) {
+                    const fresh = await r.json();
+                    if (Array.isArray(fresh.script)) latestScript = fresh.script;
+                }
+            } catch {}
+        }
+
         let p = 0;
         const iv = setInterval(() => {
             p += 3 + Math.random() * 4;
@@ -119,11 +168,30 @@ export default function Page() {
                 clearInterval(iv);
                 setInjectStatus('Injection complete.');
                 setInjectPct(100);
-                islandSend({ type: 'island', action: 'progress', pct: 100 });
-                islandSend({ type: 'island', action: 'done' });
+                // Send the product's script to the Island so it starts
+                // playing the customer-facing instructions.
+                const script = Array.isArray(latestScript) && latestScript.length
+                    ? latestScript
+                    : [{ kind: 'message', text: `${productName} loaded successfully!`, dismiss: 'timeout', timeout: 2.5 },
+                       { kind: 'close' }];
+                pushEvent(`island: playing ${script.length} step${script.length === 1 ? '' : 's'} for ${productName}`, 'ok');
+                islandSend({
+                    type: 'island',
+                    action: 'script',
+                    product: productName,
+                    steps: script,
+                });
+
+                // Once the island is in charge, hide the dashboard.
+                // Browsers block window.close() on tabs the user opened
+                // manually — if that fails we drop the UI to a subtle
+                // "dynamic island active" placeholder so nothing distracts.
+                setTimeout(() => {
+                    setScreen('handover');
+                    try { window.close(); } catch {}
+                }, 900);
             } else {
                 setInjectPct(p);
-                islandSend({ type: 'island', action: 'progress', pct: p });
             }
         }, 90);
     };
@@ -205,6 +273,82 @@ export default function Page() {
         };
         el.click();
     };
+
+    // ---- SCRIPT EDITOR ----
+    // A script is an ordered list of steps the Dynamic Island plays after
+    // the product finishes loading. See PUT /api/products/[id] for the shape.
+    const [scriptEditor, setScriptEditor] = useState(null); // { id, title, steps }
+    const openScriptEditor = (product) => {
+        const existing = Array.isArray(product.script) ? product.script : [];
+        const cloned = existing.length ? existing : [
+            { kind: 'message', text: 'Press F2 once you are in game',
+              dismiss: 'keybind', keybind: 'F2', timeout: 30 },
+            { kind: 'message', text: 'Injecting Product…',
+              dismiss: 'timeout', timeout: 3 },
+            { kind: 'success', text: 'Product Injected Successfully', timeout: 2.5 },
+            { kind: 'close', text: 'Click me to close loader', timeout: 4 },
+        ];
+        // Reset the "last-saved" watermark so the auto-save effect will
+        // PUT the current buffer even if it happens to equal the previous
+        // session's contents.
+        _lastSavedRef.current = existing.length ? JSON.stringify(existing) : '';
+        setScriptSaveState('idle');
+        setScriptEditor({ id: product.id, title: product.title, steps: cloned });
+    };
+    const updateStep = (idx, patch) => setScriptEditor(s =>
+        s ? { ...s, steps: s.steps.map((st, i) => i === idx ? { ...st, ...patch } : st) } : s
+    );
+    const addStep = (kind) => setScriptEditor(s => {
+        if (!s) return s;
+        let base;
+        if (kind === 'close')      base = { kind: 'close',   text: 'Click me to close loader', timeout: 4 };
+        else if (kind === 'success') base = { kind: 'success', text: 'Product Injected Successfully', timeout: 2.5 };
+        else                       base = { kind: 'message', text: 'Type message…', dismiss: 'timeout', timeout: 2 };
+        return { ...s, steps: [...s.steps, base] };
+    });
+    const removeStep = (idx) => setScriptEditor(s =>
+        s ? { ...s, steps: s.steps.filter((_, i) => i !== idx) } : s
+    );
+    const moveStep = (idx, dir) => setScriptEditor(s => {
+        if (!s) return s;
+        const j = idx + dir;
+        if (j < 0 || j >= s.steps.length) return s;
+        const steps = s.steps.slice();
+        [steps[idx], steps[j]] = [steps[j], steps[idx]];
+        return { ...s, steps };
+    });
+    // Auto-save script edits back to the server (debounced). No manual
+    // "SAVE" button — you can't forget it. `_savedRef` remembers the last
+    // JSON we PUT so we don't spam the network with identical bodies.
+    const _lastSavedRef = useRef('');
+    const [scriptSaveState, setScriptSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved'
+    useEffect(() => {
+        if (!scriptEditor) return;
+        const body = JSON.stringify(scriptEditor.steps);
+        if (body === _lastSavedRef.current) return;
+        setScriptSaveState('saving');
+        const t = setTimeout(async () => {
+            try {
+                const form = new FormData();
+                form.append('script', body);
+                const r = await fetch(`/api/products/${scriptEditor.id}`, { method: 'PUT', body: form });
+                if (r.ok) {
+                    _lastSavedRef.current = body;
+                    setScriptSaveState('saved');
+                    pushEvent(`script auto-saved for ${scriptEditor.title} (${scriptEditor.steps.length} step${scriptEditor.steps.length === 1 ? '' : 's'})`, 'ok');
+                    await loadProducts();
+                } else {
+                    const j = await r.json().catch(() => ({}));
+                    setScriptSaveState('idle');
+                    pushEvent('script save failed: ' + (j.error || r.status), 'bad');
+                }
+            } catch (e) {
+                setScriptSaveState('idle');
+                pushEvent('script save error: ' + e.message, 'bad');
+            }
+        }, 350);
+        return () => clearTimeout(t);
+    }, [scriptEditor?.steps, scriptEditor?.id]);
 
     const renameProduct = async (id, currentTitle) => {
         const t = prompt('Rename product to:', currentTitle || '');
@@ -339,120 +483,106 @@ export default function Page() {
             </svg>
 
             <div className="app">
-                <nav className="nav">
-                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <div className="logo"><span className="kw">YULLY</span><span className="sp">HUB</span></div>
-                        <div className="nav-tabs">
-                            <button className={`tab ${screen === 'home' ? 'active' : ''}`} onClick={() => setScreen('home')}>home</button>
-                            <button className={`tab ${screen === 'admin' ? 'active' : ''}`} onClick={() => setScreen('admin')}>admin</button>
-                            <button className={`tab ${screen === 'settings' ? 'active' : ''}`} onClick={() => setScreen('settings')}>settings</button>
-                            <button className={`tab ${screen === 'login' ? 'active' : ''}`} onClick={() => setScreen('login')}>login</button>
-                            <button className="tab">help</button>
-                        </div>
+                <aside className="sidebar">
+                    <div className="sidebar-brand">Y</div>
+                    <div className="sidebar-thread">
+                        <button
+                            className={`sidebar-nav-btn ${screen === 'home' ? 'active' : ''}`}
+                            onClick={() => setScreen('home')}
+                            title="Home"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
+                        </button>
+                        <button
+                            className={`sidebar-nav-btn ${screen === 'admin' ? 'active' : ''}`}
+                            onClick={() => setScreen('admin')}
+                            title="Admin — upload products"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M4 21h16"/></svg>
+                        </button>
+                        <button
+                            className={`sidebar-nav-btn ${screen === 'settings' ? 'active' : ''}`}
+                            onClick={() => setScreen('settings')}
+                            title="Settings"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                        </button>
+                        <button
+                            className={`sidebar-nav-btn ${screen === 'login' ? 'active' : ''}`}
+                            onClick={() => setScreen('login')}
+                            title="Account"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        </button>
                     </div>
-                    <div className="nav-right">
-                        <div className="status-pill">
-                            <span className={`pulse-dot ${state.online ? 'on' : ''}`}></span>
-                            {state.online ? `${state.count} loader${state.count === 1 ? '' : 's'} online` : 'no loader connected'}
-                        </div>
-                        <button className="donate">DONATE</button>
-                        <div className="user">
-                            <div className="avatar">M</div>
-                            <span>moonnight</span>
-                        </div>
+                    <div className="sidebar-footer" title="YullyHub">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>
                     </div>
-                </nav>
+                </aside>
 
-                <div className="main">
+                <main className="main-col">
+                    <div className="topbar">
+                        <div className="brand-mark">YULLYHUB</div>
+                        <div className="top-actions">
+                            <div className="status-pill">
+                                <span className={`pulse-dot ${state.online ? 'on' : ''}`}></span>
+                                {state.online ? `${state.count} loader${state.count === 1 ? '' : 's'} online` : 'no loader'}
+                            </div>
+                            <button className="icon-btn" title="Minimize">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            </button>
+                            <button className="icon-btn" title="Close" onClick={() => window.close?.()}>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="main">
                     {screen === 'home' && (
                         <section className="screen home-inner" key="home">
-                            <div
-                                className={`carousel-stage ${dragging ? 'is-dragging' : ''}`}
-                                onMouseDown={onCarouselDown}
-                                onTouchStart={onCarouselDown}
-                            >
-                                <div
-                                    className={`carousel-inner ${dragging ? 'is-dragging' : ''}`}
-                                    style={{ transform: `translateX(${dragDelta}px)` }}
-                                >
+                            <div className="grid-heading">
+                                <div>
+                                    <div className="title">Products</div>
+                                    <div className="subtitle">Click Start on any card to launch</div>
+                                </div>
+                                <div className="subtitle">{list.length} available</div>
+                            </div>
+
+                            {list.length === 0 ? (
+                                <div className="empty-state">
+                                    No products yet. Upload one in Admin.
+                                </div>
+                            ) : (
+                                <div className="card-grid">
                                     {list.map((game, idx) => {
-                                        const slot = slotFor(idx);
-                                        if (slot === 'hidden') return null;
+                                        const isActive = idx === safeSelected;
                                         const bg = game.imageName && !game.demo
                                             ? { backgroundImage: `url(/api/products/${game.id}/image)` }
                                             : undefined;
                                         return (
                                             <div
                                                 key={game.id}
-                                                className={`game-card ${game.cls || 'g-dota'}`}
-                                                data-slot={slot}
+                                                className={`grid-card ${game.cls || 'g-dota'} ${isActive ? 'active' : ''}`}
                                                 style={bg}
-                                                onClick={(e) => {
-                                                    if (dragging) return;
-                                                    if (Math.abs(dragDelta) > 4) return;
-                                                    if (slot === '-1' || slot === '-2') commitSwitch(-1);
-                                                    else if (slot === '1' || slot === '2') commitSwitch(1);
-                                                }}
+                                                onClick={() => setSelected(idx)}
                                             >
-                                                <div className="card-body">
-                                                    <div className="card-title">{game.name}</div>
-                                                    <div className="card-caption">{game.desc}</div>
-                                                </div>
+                                                <div className="card-name">{game.name}</div>
+                                                <div className="card-caption">{game.desc}</div>
+                                                <button
+                                                    className="start-btn"
+                                                    disabled={!state.online}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        // Pass idx directly — bypasses the stale-closure bug
+                                                        // where handleStart was reading the previous `selected`.
+                                                        handleStart(idx);
+                                                    }}
+                                                >
+                                                    START
+                                                </button>
                                             </div>
                                         );
                                     })}
-                                </div>
-                            </div>
-
-                            {/* status row (Updating / Ready / Waiting) sits directly under the active card */}
-                            <div className="status-row">
-                                <span className={`pulse ${state.online ? 'online' : ''}`}></span>
-                                <span>{state.online ? (g.updatedAt ? 'Updating' : 'Ready') : 'Offline'}</span>
-                            </div>
-
-                            <div className="deck-nav">
-                                <button
-                                    className="deck-nav-btn"
-                                    onClick={() => commitSwitch(-1)}
-                                    disabled={transitioning || list.length === 0}
-                                    aria-label="Previous"
-                                >
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                        <polyline points="15 18 9 12 15 6"></polyline>
-                                    </svg>
-                                </button>
-                                <button
-                                    className="deck-nav-btn"
-                                    onClick={() => commitSwitch(1)}
-                                    disabled={transitioning || list.length === 0}
-                                    aria-label="Next"
-                                >
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                        <polyline points="9 18 15 12 9 6"></polyline>
-                                    </svg>
-                                </button>
-                            </div>
-
-                            {list.length > 1 && (
-                                <div className="carousel-dots">
-                                    {list.map((_, i) => (
-                                        <div
-                                            key={i}
-                                            className={`carousel-dot ${i === safeSelected ? 'active' : ''}`}
-                                            onClick={() => setSelected(i)}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-
-                            <div className="feature-title">{g.name}</div>
-                            <div className="feature-desc">{g.desc}</div>
-                            <button className="primary-btn" onClick={handleStart} disabled={!state.online}>
-                                {g.demo ? 'PING' : 'LOAD PRODUCT'}
-                            </button>
-                            {!state.online && (
-                                <div style={{marginTop: 14, fontSize: 11, color: 'var(--muted)'}}>
-                                    Waiting for loader.exe to connect…
                                 </div>
                             )}
                         </section>
@@ -480,6 +610,16 @@ export default function Page() {
                                 </div>
                             </div>
                             <button className="back-btn" onClick={() => setScreen('home')}>BACK</button>
+                        </section>
+                    )}
+
+                    {screen === 'handover' && (
+                        <section className="screen handover-inner" key="handover">
+                            <div className="handover-title">Dynamic Island active</div>
+                            <div className="handover-sub">
+                                {g?.name || 'Your product'} is running. Watch the Dynamic Island for the next step — you can close this window.
+                            </div>
+                            <button className="back-btn" onClick={() => setScreen('home')}>Back to products</button>
                         </section>
                     )}
 
@@ -597,6 +737,14 @@ export default function Page() {
                                                     Rename
                                                 </button>
                                                 <button
+                                                    className="mini-btn"
+                                                    disabled={busy}
+                                                    onClick={() => openScriptEditor(p)}
+                                                    title="Edit the post-injection Dynamic Island script"
+                                                >
+                                                    Script ({Array.isArray(p.script) ? p.script.length : 0})
+                                                </button>
+                                                <button
                                                     className="mini-btn danger"
                                                     onClick={() => deleteProduct(p.id)}
                                                 >
@@ -707,8 +855,179 @@ export default function Page() {
                             <button className="primary-btn wide">ENTER</button>
                         </section>
                     )}
-                </div>
+                    </div>
+                </main>
             </div>
+
+            {scriptEditor && (
+                <div className="modal-veil" onClick={() => setScriptEditor(null)}>
+                    <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-head">
+                            <div>
+                                <div className="modal-title">Dynamic Island Script</div>
+                                <div className="modal-sub">
+                                    {scriptEditor.title}
+                                    <span className={`save-chip ${scriptSaveState}`}>
+                                        {scriptSaveState === 'saving' && 'saving…'}
+                                        {scriptSaveState === 'saved'  && '✓ saved'}
+                                        {scriptSaveState === 'idle'   && ''}
+                                    </span>
+                                </div>
+                            </div>
+                            <button className="icon-btn" onClick={() => setScriptEditor(null)}>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+                            </button>
+                        </div>
+
+                        <div className="step-list">
+                            {scriptEditor.steps.map((s, i) => (
+                                <div className="step-row" key={i}>
+                                    <div className="step-idx">{i + 1}</div>
+
+                                    <div className="step-body">
+                                        <div className="step-controls">
+                                            <select
+                                                className="step-select"
+                                                value={s.kind || 'message'}
+                                                onChange={(e) => updateStep(i, { kind: e.target.value })}
+                                            >
+                                                <option value="message">Show message</option>
+                                                <option value="success">Show success (✓)</option>
+                                                <option value="close">Close (bye pill)</option>
+                                            </select>
+
+                                            <div className="step-move">
+                                                <button className="mini-btn" onClick={() => moveStep(i, -1)} disabled={i === 0}>↑</button>
+                                                <button className="mini-btn" onClick={() => moveStep(i,  1)} disabled={i === scriptEditor.steps.length - 1}>↓</button>
+                                                <button className="mini-btn danger" onClick={() => removeStep(i)}>✕</button>
+                                            </div>
+                                        </div>
+
+                                        {(s.kind || 'message') === 'message' && (
+                                            <>
+                                                <input
+                                                    className="step-input"
+                                                    type="text"
+                                                    placeholder='e.g. Press F2 once you are in Fortnite lobby'
+                                                    value={s.text || ''}
+                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
+                                                />
+
+                                                <div className="step-triggers">
+                                                    <label>
+                                                        Advance:&nbsp;
+                                                        <select
+                                                            className="step-select"
+                                                            value={s.dismiss || 'timeout'}
+                                                            onChange={(e) => updateStep(i, { dismiss: e.target.value })}
+                                                        >
+                                                            <option value="timeout">After timeout</option>
+                                                            <option value="keybind">On keypress</option>
+                                                            <option value="both">Either (whichever first)</option>
+                                                        </select>
+                                                    </label>
+
+                                                    {(s.dismiss === 'timeout' || s.dismiss === 'both' || !s.dismiss) && (
+                                                        <label>
+                                                            &nbsp;Timeout:&nbsp;
+                                                            <input
+                                                                type="number"
+                                                                className="step-num"
+                                                                min="0"
+                                                                step="0.1"
+                                                                value={s.timeout ?? 2}
+                                                                onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
+                                                            />
+                                                            &nbsp;s
+                                                        </label>
+                                                    )}
+
+                                                    {(s.dismiss === 'keybind' || s.dismiss === 'both') && (
+                                                        <label>
+                                                            &nbsp;Key:&nbsp;
+                                                            <input
+                                                                type="text"
+                                                                className="step-num"
+                                                                placeholder='F2'
+                                                                value={s.keybind || ''}
+                                                                onChange={(e) => updateStep(i, { keybind: e.target.value.toUpperCase() })}
+                                                            />
+                                                        </label>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {s.kind === 'success' && (
+                                            <>
+                                                <input
+                                                    className="step-input"
+                                                    type="text"
+                                                    placeholder='e.g. Product Injected Successfully'
+                                                    value={s.text || ''}
+                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
+                                                />
+                                                <div className="step-triggers">
+                                                    <label>
+                                                        Show for:&nbsp;
+                                                        <input
+                                                            type="number"
+                                                            className="step-num"
+                                                            min="0"
+                                                            step="0.1"
+                                                            value={s.timeout ?? 2.5}
+                                                            onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
+                                                        />
+                                                        &nbsp;s
+                                                    </label>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {s.kind === 'close' && (
+                                            <>
+                                                <input
+                                                    className="step-input"
+                                                    type="text"
+                                                    placeholder='Click me to close loader'
+                                                    value={s.text || ''}
+                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
+                                                />
+                                                <div className="step-triggers">
+                                                    <label>
+                                                        Auto-close after:&nbsp;
+                                                        <input
+                                                            type="number"
+                                                            className="step-num"
+                                                            min="0"
+                                                            step="0.1"
+                                                            value={s.timeout ?? 4}
+                                                            onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
+                                                        />
+                                                        &nbsp;s
+                                                    </label>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="modal-foot">
+                            <div className="add-step-row">
+                                <button className="mini-btn" onClick={() => addStep('message')}>+ Message</button>
+                                <button className="mini-btn" onClick={() => addStep('success')}>+ Success ✓</button>
+                                <button className="mini-btn" onClick={() => addStep('close')}>+ Close pill</button>
+                            </div>
+                            <div className="modal-hint">
+                                Changes save automatically.
+                            </div>
+                            <button className="mini-btn" onClick={() => setScriptEditor(null)}>Done</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

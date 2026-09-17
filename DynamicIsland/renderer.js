@@ -16,19 +16,29 @@
 const NOW = () => performance.now() / 1000.0;
 const clamp01 = (t) => Math.max(0, Math.min(1, t));
 
-// ---- Anchored dims: top edge of pill sits at y = TOP_ANCHOR always ----
-const TOP_ANCHOR = 20.0;
+// ---- Anchored dims: BOTTOM edge of pill sits at y = BOTTOM_ANCHOR always.
+// `y` in the sY spring represents the pill's BOTTOM edge (in stage-px).
+// Because the anchor is fixed at the bottom, as the pill grows taller
+// its TOP edge rises upward — so the pill "grows up" from the bottom of
+// the window. Stage height H is defined below as 340. ---------------
+const BOTTOM_ANCHOR = 320.0;   // 20px margin from the stage's bottom edge
 function anchored(w, h) {
-    return { w: w, h: h, y: TOP_ANCHOR + h };
+    return { w: w, h: h, y: BOTTOM_ANCHOR };
 }
 // Full on-screen sizes (NOT half-extents). Pill grows downward from top.
 const DIM = {
+    // A truly-hidden state: 0×0 pill so nothing paints. Every panel's
+    // opacity is set to 0 while `state === 'hidden'`.
+    hidden:  anchored(0,   0),
     dot:     anchored(30,  30),
     welcome: anchored(380, 60),
     idle:    anchored(200, 44),
     loading: anchored(400, 128),
     success: anchored(480, 200),
     close:   anchored(290, 52),
+    // Message pill used by the SCRIPT engine — resized to fit each step's
+    // text (see measureMsgDims below).
+    msg:     anchored(440, 60),
 };
 
 const TIMING = {
@@ -245,28 +255,90 @@ const loadingPanel  = document.getElementById('loading-panel');
 const loadStatus    = document.getElementById('load-status');
 const loadFill      = document.getElementById('load-fill');
 const successPanel  = document.getElementById('success-panel');
+const successText   = document.getElementById('success-text');
 const closePanel    = document.getElementById('close-panel');
-const PANELS = [welcomePanel, idlePanel, loadingPanel, successPanel, closePanel];
+const msgPanel      = document.getElementById('msg-panel');
+const msgText       = document.getElementById('msg-text');
+const msgHint       = document.getElementById('msg-hint');
+const PANELS = [welcomePanel, idlePanel, loadingPanel, successPanel, closePanel, msgPanel];
 
 // ==========================================
-//  State machine
+//  State machine — the island starts INVISIBLE. No birth animation,
+//  no idle brand pill. It only appears once a script event arrives.
 // ==========================================
-let state = 'dot';
+let state = 'hidden';
 let stateStart = NOW();
 let loadingActive = false;
 let loadingProduct = '';
 let loadingPct = 0;
+sW.snapTo(DIM.hidden.w); sH.snapTo(DIM.hidden.h); sY.snapTo(DIM.hidden.y);
 
 const DIMS_FOR = {
+    hidden: DIM.hidden,
     dot: DIM.dot, expanding: DIM.welcome, welcome: DIM.welcome,
-    retracting: DIM.idle, idle: DIM.idle,
+    retracting: DIM.hidden, idle: DIM.hidden,   // retract straight to hidden
     loading: DIM.loading, success: DIM.success, close: DIM.close,
+    msg: DIM.msg,
 };
-function setState(next) {
+function setState(next, dimOverride) {
     state = next;
     stateStart = NOW();
-    const t = DIMS_FOR[next] || DIM.idle;
+    const t = dimOverride || DIMS_FOR[next] || DIM.idle;
     sW.setTarget(t.w); sH.setTarget(t.h); sY.setTarget(t.y);
+}
+
+// ---- Auto-sized message pill --------------------------------------------
+// Measure the current step's text (+ optional keybind hint) using a hidden
+// element that inherits the exact msg-panel typography, then return a dim
+// tuple the msg pill should morph to. Grows in X for short text, wraps to
+// multiple lines and grows in Y for long text.
+const _measureBox = document.createElement('div');
+Object.assign(_measureBox.style, {
+    position: 'absolute',
+    visibility: 'hidden',
+    pointerEvents: 'none',
+    top: '-2000px', left: '-2000px',
+    fontFamily: "'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    fontWeight: '500',
+    fontSize: '14px',
+    letterSpacing: '0.3px',
+    lineHeight: '1.35',
+    padding: '6px 26px',
+    boxSizing: 'border-box',
+});
+document.body.appendChild(_measureBox);
+
+const MSG_MIN_W = 180;
+const MSG_MAX_W = 640;   // stage width is 780 — leave breathing room
+const MSG_MIN_H = 48;
+const MSG_PAD_H = 18;    // px of vertical breathing room around the text
+
+function measureMsgDims(text, keybind) {
+    const label = (text || '') + (keybind ? '   ' + keybind : '');
+
+    // 1st pass: no wrap — natural width of the text.
+    _measureBox.style.whiteSpace = 'nowrap';
+    _measureBox.style.maxWidth = 'none';
+    _measureBox.textContent = label;
+    let w = _measureBox.offsetWidth;
+    let h = _measureBox.offsetHeight;
+
+    // Fits on one line inside our max? Use it directly.
+    if (w <= MSG_MAX_W) {
+        const finalW = Math.max(MSG_MIN_W, w + 24);   // 12px pad each side
+        const finalH = Math.max(MSG_MIN_H, h + MSG_PAD_H);
+        msgPanel.style.whiteSpace = 'nowrap';
+        msgPanel.style.maxWidth = 'none';
+        return anchored(finalW, finalH);
+    }
+
+    // Too wide — wrap to MSG_MAX_W and re-measure the height.
+    _measureBox.style.whiteSpace = 'normal';
+    _measureBox.style.maxWidth = MSG_MAX_W + 'px';
+    h = _measureBox.offsetHeight;
+    msgPanel.style.whiteSpace = 'normal';
+    msgPanel.style.maxWidth = MSG_MAX_W + 'px';
+    return anchored(MSG_MAX_W, Math.max(MSG_MIN_H, h + MSG_PAD_H));
 }
 
 // ==========================================
@@ -280,6 +352,129 @@ function paintProgress() {
 }
 paintProgress();
 
+// ==========================================
+//  SCRIPT ENGINE — plays an admin-authored sequence of steps.
+//  Each step: { kind: 'message'|'close', text, dismiss, timeout, keybind }
+// ==========================================
+let scriptSteps = [];
+let scriptIdx = 0;
+let scriptTimer = null;
+let scriptKeybind = null;
+let scriptUnhook = null;
+
+function clearScriptWaits() {
+    if (scriptTimer !== null) { clearTimeout(scriptTimer); scriptTimer = null; }
+    if (scriptKeybind && window.electronAPI) {
+        window.electronAPI.unregisterKeybind(scriptKeybind);
+    }
+    scriptKeybind = null;
+}
+
+function endScript() {
+    clearScriptWaits();
+    scriptSteps = [];
+    scriptIdx = 0;
+    // Vanish entirely — no idle brand pill, no ghost.
+    setState('hidden');
+}
+
+// Monotonically-increasing script generation — every fresh `script` event
+// bumps it. Any timer / keybind that fires from an OLD generation is
+// silently discarded so a re-triggered script never plays 2 steps at once.
+let scriptGen = 0;
+
+function playStep(i) {
+    const myGen = scriptGen;
+    const captured = i;   // capture BY VALUE, no module-level state races
+    clearScriptWaits();
+    if (!Array.isArray(scriptSteps) || captured >= scriptSteps.length) {
+        endScript();
+        return;
+    }
+    scriptIdx = captured;
+    const step = scriptSteps[captured] || {};
+    const kind = step.kind || 'message';
+    console.log('[island] step', captured, kind, step.text || '', 'timeout=', step.timeout, 'key=', step.keybind);
+
+    if (kind === 'success') {
+        // Big check-mark stage with custom text below it, then advance
+        // after `timeout` seconds (default 2.5).
+        if (step.text) successText.textContent = step.text;
+        setState('success');
+        const secs = Number(step.timeout);
+        const ms = (Number.isFinite(secs) && secs > 0) ? secs * 1000 : 2500;
+        const nextIdx = captured + 1;
+        scriptTimer = setTimeout(() => {
+            if (myGen !== scriptGen) return;
+            playStep(nextIdx);
+        }, ms);
+        return;
+    }
+
+    if (kind === 'close') {
+        // If the author supplied bye-text we show the close pill briefly.
+        // If they left it blank we skip the pill entirely and collapse
+        // straight to hidden — no "Click me to close loader" default.
+        const byeText = (step.text || '').trim();
+        if (!byeText) {
+            endScript();
+            return;
+        }
+        closePanel.textContent = byeText;
+        setState('close');
+        const secs = Number(step.timeout);
+        const ms = (Number.isFinite(secs) && secs > 0) ? secs * 1000 : 900;
+        scriptTimer = setTimeout(() => {
+            if (myGen !== scriptGen) return;
+            endScript();
+        }, ms);
+        return;
+    }
+
+    // message kind — auto-size pill to fit the text (grows x + y as needed)
+    msgText.textContent = step.text || '';
+    const wantsKey = (step.dismiss === 'keybind' || step.dismiss === 'both') && step.keybind;
+    const wantsTimeout = (step.dismiss === 'timeout' || step.dismiss === 'both' || !step.dismiss);
+
+    if (wantsKey) {
+        msgHint.textContent = step.keybind;
+        msgHint.style.display = 'inline-flex';
+        scriptKeybind = step.keybind;
+        if (window.electronAPI) {
+            window.electronAPI.registerKeybind(step.keybind);
+        }
+    } else {
+        msgHint.style.display = 'none';
+    }
+
+    // Measure THEN morph — dims are custom per step.
+    const dims = measureMsgDims(step.text, wantsKey ? step.keybind : null);
+    setState('msg', dims);
+
+    if (wantsTimeout) {
+        const secs = Number(step.timeout);
+        const ms = (Number.isFinite(secs) && secs > 0) ? secs * 1000 : 2500;
+        // Capture the CURRENT step index + generation so nothing external
+        // can hijack the advance target.
+        const nextIdx = captured + 1;
+        scriptTimer = setTimeout(() => {
+            if (myGen !== scriptGen) return;     // stale timer from a previous script — ignore
+            playStep(nextIdx);
+        }, ms);
+    }
+}
+
+// Hook the OS keybind handler ONCE. Every registered accelerator is
+// forwarded to us; we only advance if it matches the CURRENT waiting key
+// AND belongs to the current script generation.
+if (window.electronAPI && window.electronAPI.onKeybind) {
+    scriptUnhook = window.electronAPI.onKeybind((acc) => {
+        if (!acc || !scriptKeybind) return;
+        if (acc.toUpperCase() !== scriptKeybind.toUpperCase()) return;
+        playStep(scriptIdx + 1);
+    });
+}
+
 function connectIslandWS() {
     const host = window.YULLY_HOST || '127.0.0.1:3000';
     const ws = new WebSocket(`ws://${host}/ws-island`);
@@ -288,21 +483,16 @@ function connectIslandWS() {
         try {
             const m = JSON.parse(ev.data);
             if (m.type !== 'island') return;
-            if (m.action === 'start') {
-                loadingActive = true;
-                loadingProduct = m.product || 'product';
-                loadingPct = 0;
-                paintProgress();
-                setState('loading');
-            } else if (m.action === 'progress') {
-                loadingPct = Number(m.pct) || 0;
-                paintProgress();
-            } else if (m.action === 'done') {
-                loadingPct = 100;
-                paintProgress();
-                loadingActive = false;
-                setState('success');
-                setTimeout(() => { if (state === 'success') setState('close'); }, TIMING.successHold * 1000);
+            if (m.action === 'script' && Array.isArray(m.steps)) {
+                // Fresh generation — invalidates all stale timers/keybind waits.
+                scriptGen++;
+                scriptSteps = m.steps;
+                scriptIdx = 0;
+                console.log('[island] script gen=', scriptGen, 'steps=', scriptSteps.length);
+                playStep(0);
+            } else if (m.action === 'cancel') {
+                scriptGen++;
+                endScript();
             }
         } catch {}
     };
@@ -311,7 +501,25 @@ function connectIslandWS() {
 }
 connectIslandWS();
 
-closePanel.addEventListener('click', () => setState('idle'));
+// Any click on the island triggers a bounce animation and does nothing
+// else. Previously clicking the close pill ended the script — user asked
+// for the bye-pill to be non-interactive (advances only via its timeout).
+function bounceGlass() {
+    if (state === 'hidden') return;
+    glass.classList.remove('bounce');
+    // force a reflow so the animation restarts on repeat clicks
+    void glass.offsetWidth;
+    glass.classList.add('bounce');
+    setTimeout(() => glass.classList.remove('bounce'), 360);
+}
+document.addEventListener('mousedown', (e) => {
+    if (state === 'hidden') return;
+    // only bounce when the click landed inside the pill's bounding box
+    const rect = glass.getBoundingClientRect();
+    const inside = e.clientX >= rect.left && e.clientX <= rect.right
+                && e.clientY >= rect.top  && e.clientY <= rect.bottom;
+    if (inside) bounceGlass();
+});
 
 // ==========================================
 //  Panel alignment + opacity
@@ -320,7 +528,8 @@ function alignAllPanels() {
     // Pill's true vertical centre = TOP_ANCHOR + h/2. Previously I was
     // handing panels the pill's BOTTOM edge (sY = TOP_ANCHOR + h), which
     // parked the text on the bottom rim.
-    const centreY = TOP_ANCHOR + sH.value / 2;
+    // Pill's true vertical centre = bottom-edge (sY) minus half its height.
+    const centreY = sY.value - sH.value / 2;
     for (const el of PANELS) {
         el.style.top       = centreY + 'px';
         el.style.transform = 'translate(-50%, -50%)';
@@ -329,7 +538,7 @@ function alignAllPanels() {
 
 function paintPanelOpacities(now) {
     const dt = now - stateStart;
-    let welcome = 0, idle = 0, loading = 0, success = 0, close = 0;
+    let welcome = 0, idle = 0, loading = 0, success = 0, close = 0, msg = 0;
     if (state === 'welcome') {
         if (dt < TIMING.welcomeIn) welcome = dt / TIMING.welcomeIn;
         else if (dt < TIMING.welcomeIn + TIMING.welcomeHold) welcome = 1;
@@ -339,12 +548,15 @@ function paintPanelOpacities(now) {
     else if (state === 'loading')      loading = 1;
     else if (state === 'success')      success = 1;
     else if (state === 'close')        close = 1;
+    else if (state === 'msg')          msg = 1;
+    // state === 'hidden' → every panel stays at 0 (default)
 
     welcomePanel.style.opacity = String(welcome);
     idlePanel.style.opacity    = String(idle);
     loadingPanel.style.opacity = String(loading);
     successPanel.style.opacity = String(success);
     closePanel.style.opacity   = String(close);
+    msgPanel.style.opacity     = String(msg);
 }
 
 // ==========================================
@@ -370,7 +582,9 @@ function tick() {
     const delta = now - prev;
     prev = now;
 
-    if (!loadingActive && state !== 'success' && state !== 'close') updateStateMachine(now);
+    // Never auto-advance the birth timeline while a script is playing —
+    // the script engine drives its own state changes end-to-end.
+    if (state !== 'success' && state !== 'close' && state !== 'msg') updateStateMachine(now);
 
     const w = sW.update(delta);
     const h = sH.update(delta);

@@ -5,8 +5,40 @@
     <title>YullyHub Dynamic Island</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=block" rel="stylesheet">
     <style>
+        /* Belt-and-suspenders — inline @font-face pointing at Google's static
+           CDN so Poppins loads even if a CSP or cache quirk blocks the
+           stylesheet <link> above. `font-display: block` waits for the font
+           to arrive before painting text so we never flash Segoe first. */
+        @font-face {
+            font-family: 'Poppins';
+            font-style: normal;
+            font-weight: 400;
+            font-display: block;
+            src: url(https://fonts.gstatic.com/s/poppins/v22/pxiEyp8kv8JHgFVrJJfecnFHGPc.woff2) format('woff2');
+        }
+        @font-face {
+            font-family: 'Poppins';
+            font-style: normal;
+            font-weight: 500;
+            font-display: block;
+            src: url(https://fonts.gstatic.com/s/poppins/v22/pxiByp8kv8JHgFVrLGT9Z1xlFd2JQEk.woff2) format('woff2');
+        }
+        @font-face {
+            font-family: 'Poppins';
+            font-style: normal;
+            font-weight: 600;
+            font-display: block;
+            src: url(https://fonts.gstatic.com/s/poppins/v22/pxiByp8kv8JHgFVrLEj6Z1xlFd2JQEk.woff2) format('woff2');
+        }
+        @font-face {
+            font-family: 'Poppins';
+            font-style: normal;
+            font-weight: 700;
+            font-display: block;
+            src: url(https://fonts.gstatic.com/s/poppins/v22/pxiByp8kv8JHgFVrLCz7Z1xlFd2JQEk.woff2) format('woff2');
+        }
         :root {
             /* Black tint layer — solid dark body over the liquid-glass
                refraction. The desktop still refracts through the bezel
@@ -176,8 +208,50 @@
         #close-panel {
             font-weight: 500; font-size: 14px; letter-spacing: 0.3px;
             color: #ffffff; white-space: nowrap;
-            cursor: pointer; pointer-events: auto;
             padding: 4px 8px; user-select: none;
+            /* clicks do nothing but a bounce — no close-on-click. */
+            pointer-events: none;
+        }
+
+        /* Click bounce — the whole glass squishes briefly. Layered on top
+           of the existing translateX(-50%) so horizontal centering stays. */
+        #glass.bounce {
+            animation: glassBounce 0.34s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        @keyframes glassBounce {
+            0%   { transform: translateX(-50%) scale(1);    }
+            40%  { transform: translateX(-50%) scale(0.93); }
+            100% { transform: translateX(-50%) scale(1);    }
+        }
+
+        /* MESSAGE panel — used by the script engine. Width and wrap are
+           adjusted at runtime to fit the current step's text (see the
+           `measureMsgDims` helper in renderer.js). */
+        #msg-panel {
+            font-weight: 500;
+            font-size: 14px;
+            letter-spacing: 0.3px;
+            color: #ffffff;
+            padding: 6px 26px;
+            text-align: center;
+            line-height: 1.35;
+            /* white-space and max-width are set inline from JS per step */
+        }
+        #msg-panel .kb-hint {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 22px;
+            height: 22px;
+            padding: 0 6px;
+            margin-left: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.10);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            color: rgba(255, 255, 255, 0.9);
         }
     </style>
 </head>
@@ -188,7 +262,6 @@
         <div class="float-panel" id="welcome-panel">Welcome to YullyHUB</div>
 
         <div class="float-panel" id="idle-panel">
-            <span class="dot"></span>
             <span>YULLY HUB</span>
         </div>
 
@@ -202,10 +275,15 @@
             <div class="check-wrap">
                 <svg viewBox="0 0 24 24"><path d="M4 12.5 L10 18.5 L20 6.5"></path></svg>
             </div>
-            <div class="success-text">Product has been loaded successfully!</div>
+            <div class="success-text" id="success-text">Product has been loaded successfully!</div>
         </div>
 
         <div class="float-panel" id="close-panel">Click me to close loader</div>
+
+        <div class="float-panel" id="msg-panel">
+            <span id="msg-text"></span>
+            <span class="kb-hint" id="msg-hint" style="display:none;"></span>
+        </div>
     </div>
 
     <!-- SVG filter definitions — the actual liquid glass. `<defs>` is

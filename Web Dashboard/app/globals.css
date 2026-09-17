@@ -119,15 +119,139 @@ body::after {
 
 button { font-family: inherit; }
 
+/* App shell — flat sidebar + main column, all one dark surface (no
+   floating panels). Matches the mockup's edge-to-edge dark look. */
 .app {
     display: flex;
-    flex-direction: column;
     min-height: 100vh;
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 22px 30px 30px;
-    position: relative;   /* needed so the floating accent orb positions off it */
+    position: relative;
+    background: #0e0f14;              /* slightly lifted from --bg-0 */
+    border-radius: 0;
 }
+
+/* ---------- SIDEBAR (thin left rail) ---------- */
+.sidebar {
+    width: 92px;
+    flex-shrink: 0;
+    background: #0b0c11;              /* a touch darker than main-col */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 46px 0 46px;
+    position: relative;
+}
+
+.sidebar-thread {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 46px;                      /* space between the nav dots */
+    padding: 12px 0;
+}
+.sidebar-thread::before {
+    /* red thread connecting every dot vertically */
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 20px;
+    bottom: 20px;
+    width: 1.5px;
+    background: var(--accent);
+    transform: translateX(-50%);
+    box-shadow: 0 0 8px -1px var(--accent-glow);
+    z-index: 0;
+    opacity: 0.85;
+}
+.sidebar-nav-btn {
+    position: relative;
+    z-index: 1;
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: #14161d;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+    display: grid; place-items: center;
+    cursor: pointer;
+    transition: background 0.2s var(--ease-out), color 0.2s var(--ease-out),
+                border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+}
+.sidebar-nav-btn:hover {
+    background: #1a1c25;
+    color: var(--text);
+}
+.sidebar-nav-btn.active {
+    background: #16171f;
+    border-color: rgba(233, 17, 55, 0.6);
+    color: var(--text-strong);
+    box-shadow:
+        0 0 0 3px rgba(233, 17, 55, 0.08),
+        0 8px 20px -10px var(--accent-glow);
+}
+.sidebar-nav-btn svg { width: 15px; height: 15px; }
+
+/* Brand chip is hidden — mockup has none */
+.sidebar-brand { display: none; }
+.sidebar-footer { display: none; }
+
+/* ---------- MAIN COLUMN ----------
+   Flat dark surface. No panel wrapper, no rounded corners, no
+   border. Content sits directly on the background — the mockup
+   has no visible container around the grid. */
+.main-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: transparent;
+    min-height: 100vh;
+    overflow: hidden;
+    box-shadow: none;
+    border: none;
+    border-radius: 0;
+}
+
+/* Top bar — thin divider strip, minimal, mockup has no visible text here */
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 32px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    background: #0b0c11;
+    min-height: 60px;
+}
+.topbar .brand-mark { display: none; }   /* mockup has no top-bar brand */
+.topbar .top-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+}
+.topbar .status-pill {
+    padding: 6px 12px;
+    border-radius: var(--r-pill);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.topbar .icon-btn {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--muted);
+    display: grid; place-items: center;
+    cursor: pointer;
+    transition: background 0.2s var(--ease-out), color 0.2s var(--ease-out);
+}
+.topbar .icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+.topbar .icon-btn svg { width: 14px; height: 14px; }
 
 /* ============= NAV ============= */
 .nav {
@@ -253,23 +377,21 @@ button { font-family: inherit; }
 /* ============= MAIN ============= */
 .main {
     flex: 1;
-    display: grid;
-    place-items: center;
-    padding: 24px 0;
+    display: block;               /* no centering — content sits at top-left */
+    padding: 0;
+    width: 100%;
 }
 .screen {
     width: 100%;
-    max-width: 680px;
     padding: 40px 44px;
-    background: var(--panel);
-    backdrop-filter: blur(28px) saturate(1.1);
-    -webkit-backdrop-filter: blur(28px) saturate(1.1);
-    border: 1px solid var(--border);
-    border-radius: 22px;
-    box-shadow:
-        0 40px 80px -30px rgba(0,0,0,0.6),
-        inset 0 1px 0 rgba(255,255,255,0.03);
     animation: fadeIn 0.3s ease;
+    background: transparent;      /* mockup: no panel around the content */
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    max-width: none;
 }
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(8px); }
@@ -277,11 +399,321 @@ button { font-family: inherit; }
 }
 
 /* ==========================================
-   HOME — 5-slot horizontal carousel (Apple TV / Netflix style)
-   Big centred card, dimmer neighbours, faded far-edge cards.
-   Drag centimetre-by-centimetre, snap on release.
+   HOME — game grid (mockup-style)
+   3 columns × N rows of landscape hero cards. Selected card gets an
+   accent ring + Start button on hover; every card shows its title in
+   the top-left corner Uni-Macros style.
    ========================================== */
-.home-inner { text-align: center; padding-top: 6px; }
+.home-inner {
+    padding: 32px 44px 44px;
+    text-align: left;
+}
+
+.grid-heading {
+    display: none;
+}
+
+.card-grid {
+    display: grid;
+    /* Bigger cards, auto-fill so they flow top-left rather than shrink
+       into the centre of a fixed-width column. */
+    grid-template-columns: repeat(auto-fill, minmax(260px, 320px));
+    gap: 22px;
+    justify-content: start;       /* anchor to the left edge */
+}
+
+.grid-card {
+    position: relative;
+    aspect-ratio: 3 / 4;              /* PORTRAIT — matches mockup */
+    border-radius: 12px;
+    background-size: cover;
+    background-position: center;
+    background-color: #14121b;
+    overflow: hidden;
+    cursor: pointer;
+    isolation: isolate;
+    border: none;                     /* mockup card has no border */
+    transition: transform 0.3s var(--ease-out),
+                box-shadow 0.3s var(--ease-out);
+}
+.grid-card::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg,
+        rgba(0, 0, 0, 0.55) 0%,
+        rgba(0, 0, 0, 0) 22%);
+    z-index: 1;
+    pointer-events: none;
+}
+.grid-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 32px -18px rgba(0, 0, 0, 0.7);
+}
+/* No accent halo / red glow / border on active — the mockup card just sits
+   there. Selection state is subtle (very faint scale + shadow). */
+.grid-card.active {
+    transform: none;
+    box-shadow: 0 20px 40px -22px rgba(0, 0, 0, 0.7);
+}
+
+.grid-card .card-name {
+    position: absolute;
+    top: 16px; left: 18px; right: 18px;
+    z-index: 2;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-strong);
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.85);
+    line-height: 1.15;
+    /* wrap up to 2 lines instead of truncating, so long titles stay
+       readable like the mockup's FORTNITE (short) but AUTOTESTCHARMAP
+       (long) also shows fully */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    white-space: normal;
+    word-break: break-word;
+}
+.grid-card .card-caption {
+    /* Mockup doesn't show subtitles inside the cards — hide by default */
+    display: none;
+}
+
+/* START — appears only on hover, sits along the bottom edge like the
+   mockup's implicit "act on this card" affordance. No red halo. */
+.grid-card .start-btn {
+    position: absolute;
+    left: 14px; right: 14px; bottom: 14px;
+    z-index: 3;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hot));
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 11px 0;
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s var(--ease-out), transform 0.25s var(--ease-out),
+                filter 0.15s;
+    box-shadow: 0 10px 24px -12px var(--accent-glow);
+}
+.grid-card:hover .start-btn { opacity: 1; transform: translateY(0); }
+.grid-card .start-btn:hover { filter: brightness(1.1); }
+.grid-card .start-btn:disabled { opacity: 0.4 !important; cursor: not-allowed; }
+
+/* Fallback demo backgrounds (kept from before, muted) */
+.g-gta  { background-image:
+    radial-gradient(circle at 30% 30%, rgba(217, 119, 6, 0.55), transparent 55%),
+    radial-gradient(circle at 80% 80%, rgba(124, 45, 18, 0.5), transparent 55%); }
+.g-dota { background-image:
+    radial-gradient(circle at 50% 30%, rgba(255, 64, 32, 0.45), transparent 55%),
+    radial-gradient(circle at 50% 90%, rgba(122, 14, 8, 0.55), transparent 60%); }
+.g-cs   { background-image:
+    linear-gradient(180deg, #1a1a1a 0%, #3a2820 100%); }
+.g-val  { background-image:
+    radial-gradient(circle at 50% 50%, rgba(255, 70, 85, 0.4), transparent 55%),
+    radial-gradient(circle at 50% 100%, rgba(122, 14, 24, 0.5), transparent 60%); }
+
+.empty-state {
+    padding: 60px 20px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+/* Handover screen — after injection completes and the Dynamic Island
+   takes over. If the browser blocks window.close() the user still gets
+   a clean, minimal "you can close" screen instead of the injection ring. */
+.handover-inner {
+    text-align: center;
+    padding: 80px 24px 60px !important;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    max-width: 480px;
+    margin: 0 auto;
+}
+.handover-title {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    color: var(--text-strong);
+}
+.handover-sub {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.55;
+    margin-bottom: 20px;
+}
+
+/* ---------- SCRIPT EDITOR MODAL ---------- */
+.modal-veil {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    z-index: 1000;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    animation: veilIn 0.2s var(--ease-out);
+}
+@keyframes veilIn { from { opacity: 0; } to { opacity: 1; } }
+
+.modal-card {
+    width: 100%;
+    max-width: 640px;
+    max-height: 88vh;
+    background: var(--panel-solid);
+    border: 1px solid var(--border);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: modalIn 0.28s var(--ease-out);
+}
+@keyframes modalIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+.modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+}
+.modal-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    color: var(--text-strong);
+}
+.modal-sub {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    margin-top: 2px;
+}
+
+.step-list {
+    padding: 16px 22px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: 1;
+}
+
+.step-row {
+    display: flex;
+    gap: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 12px 14px;
+}
+.step-idx {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    display: grid; place-items: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+.step-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+.step-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.step-move { display: flex; gap: 4px; }
+
+.step-select, .step-input, .step-num {
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.step-select:focus, .step-input:focus, .step-num:focus {
+    border-color: var(--border-accent);
+}
+.step-input { width: 100%; }
+.step-num { width: 68px; }
+
+.step-triggers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.modal-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 14px 22px;
+    border-top: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.25);
+}
+.add-step-row { display: flex; gap: 6px; }
+.modal-hint {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.2px;
+}
+.save-chip {
+    display: inline-block;
+    margin-left: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-transform: none;
+    transition: opacity 0.2s;
+}
+.save-chip.saving {
+    background: rgba(255, 176, 32, 0.14);
+    color: #ffb020;
+    border: 1px solid rgba(255, 176, 32, 0.35);
+}
+.save-chip.saved {
+    background: rgba(63, 217, 122, 0.14);
+    color: var(--ok);
+    border: 1px solid rgba(63, 217, 122, 0.35);
+}
+.save-chip.idle { opacity: 0; }
 
 .carousel-stage {
     position: relative;
@@ -840,22 +1272,26 @@ button { font-family: inherit; }
     font-family: monospace;
 }
 .product-actions {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);   /* 3 buttons per row, wraps to 2 rows */
     gap: 6px;
 }
 .mini-btn {
-    flex: 1;
     background: linear-gradient(135deg, var(--accent), var(--accent-hot));
     color: white;
     border: none;
-    padding: 7px 10px;
+    padding: 8px 6px;
     border-radius: 7px;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.4px;
     cursor: pointer;
     text-transform: uppercase;
     transition: filter 0.15s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
 }
 .mini-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }

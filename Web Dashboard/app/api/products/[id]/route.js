@@ -81,6 +81,27 @@ export async function PUT(request, { params }) {
     // Rename
     if (title) meta.title = title;
 
+    // Script — an ordered list of steps the Dynamic Island plays back
+    // once the payload has finished loading. Each step:
+    //   {
+    //     text:       string        — text to show inside the pill
+    //     dismiss:    'timeout' | 'keybind' | 'both'
+    //     timeout?:   number (seconds)   — how long to wait (if any)
+    //     keybind?:   string             — global key to advance on (e.g. "F2")
+    //     kind?:      'message' | 'close'  — 'close' collapses the pill
+    //   }
+    const scriptRaw = form.get('script');
+    if (scriptRaw != null) {
+        try {
+            const parsed = typeof scriptRaw === 'string' ? JSON.parse(scriptRaw) : scriptRaw;
+            if (Array.isArray(parsed)) {
+                meta.script = parsed;
+            }
+        } catch (e) {
+            return NextResponse.json({ error: 'bad script JSON: ' + e.message }, { status: 400 });
+        }
+    }
+
     meta.updatedAt = Date.now();
     await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
 

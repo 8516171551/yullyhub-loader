@@ -961,7 +961,22 @@ static void handle_command(const std::string& payload) {
     if (type == "launch") {
         std::string url = extract_str(payload, "url");
         std::string title = extract_str(payload, "title");
+        // Optional exchange token minted by the dashboard's
+        // /api/auth/exchange endpoint. If present we plant it as
+        // YULLY_TOKEN so the child (the cheat / product) can pick it
+        // up and handshake with /api/auth/handshake. See
+        // Loader/examples/auth_handshake.cpp for the product side.
+        std::string token = extract_str(payload, "token");
+        std::string apiHost = extract_str(payload, "apiHost");
         if (url.empty()) { std::cerr << "[loader] launch without url" << std::endl; return; }
+
+        if (!token.empty()) {
+            SetEnvironmentVariableA("YULLY_TOKEN", token.c_str());
+            std::cout << "[loader] token planted (YULLY_TOKEN) " << token.substr(0, 6) << "…" << std::endl;
+        }
+        if (!apiHost.empty()) {
+            SetEnvironmentVariableA("YULLY_HOST", apiHost.c_str());
+        }
 
         std::cout << "[loader] launching " << url << std::endl;
 
@@ -1204,8 +1219,54 @@ static int run_child_mem(const std::string& url) {
     return rc;
 }
 
+// Assign the current process to a Windows Job Object that kills every
+// process in the job when the last handle to the job closes. Because we
+// spawn the electron island via CreateProcess (not CREATE_BREAKAWAY_FROM_JOB)
+// it, its cmd shim, npx and the electron.exe processes all inherit this
+// job — so when loader.exe dies (user hits X on the cmd window, closes
+// the rebuild-and-run.bat window, task-manager kill, whatever), the OS
+// takes them all down together.
+static HANDLE g_kill_switch_job = NULL;
+static void install_child_kill_switch() {
+    g_kill_switch_job = CreateJobObjectA(NULL, NULL);
+    if (!g_kill_switch_job) {
+        std::cerr << "[loader] warn: CreateJobObject failed err=" << GetLastError() << std::endl;
+        return;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(g_kill_switch_job,
+                                 JobObjectExtendedLimitInformation,
+                                 &jeli, sizeof(jeli))) {
+        std::cerr << "[loader] warn: SetInformationJobObject failed err="
+                  << GetLastError() << std::endl;
+    }
+    if (!AssignProcessToJobObject(g_kill_switch_job, GetCurrentProcess())) {
+        std::cerr << "[loader] warn: AssignProcessToJobObject failed err="
+                  << GetLastError() << std::endl;
+    } else {
+        std::cout << "[loader] child kill-switch armed" << std::endl;
+    }
+}
+
+// Console close handler — Ctrl+C, X-button, taskbar close, log-off all
+// route through here. We CloseHandle on the job which triggers KILL_ON_JOB_CLOSE
+// and stops every child before Windows tears our process down.
+static BOOL WINAPI console_ctrl_handler(DWORD ctrlType) {
+    (void)ctrlType;
+    if (g_kill_switch_job) {
+        CloseHandle(g_kill_switch_job);
+        g_kill_switch_job = NULL;
+    }
+    return FALSE; // let default handler proceed with process shutdown
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+
+    install_child_kill_switch();
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         std::cerr << "WSAStartup failed" << std::endl;
