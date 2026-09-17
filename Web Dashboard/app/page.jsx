@@ -42,7 +42,10 @@ export default function Page() {
         let ws;
         const connect = () => {
             if (!alive) return;
-            ws = new WebSocket(`ws://${location.host}/ws-ui`);
+            // Auto-pick ws vs wss based on the page scheme so we don't
+            // trip mixed-content on Vercel (https → wss).
+            const scheme = (location.protocol === 'https:') ? 'wss' : 'ws';
+            ws = new WebSocket(`${scheme}://${location.host}/ws-ui`);
             wsRef.current = ws;
             ws.onopen = () => pushEvent('dashboard connected to server', 'ok');
             ws.onmessage = (ev) => {

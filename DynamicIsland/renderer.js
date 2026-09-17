@@ -477,7 +477,14 @@ if (window.electronAPI && window.electronAPI.onKeybind) {
 
 function connectIslandWS() {
     const host = window.YULLY_HOST || '127.0.0.1:3000';
-    const ws = new WebSocket(`ws://${host}/ws-island`);
+    // Auto-pick wss:// when the host is a public https domain, ws://
+    // for local dev on 127.x / localhost. Keeps the electron overlay
+    // working against both the local server and the Vercel deployment.
+    const isSecure = /^https:\/\//i.test(host)
+                  || (!host.startsWith('127.') && !host.startsWith('localhost') && !host.startsWith('http://'));
+    const cleanHost = host.replace(/^https?:\/\//i, '');
+    const scheme = isSecure ? 'wss' : 'ws';
+    const ws = new WebSocket(`${scheme}://${cleanHost}/ws-island`);
     ws.onopen = () => console.log('[island] ws open');
     ws.onmessage = (ev) => {
         try {

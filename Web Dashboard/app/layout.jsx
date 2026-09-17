@@ -11,6 +11,9 @@ const poppins = Poppins({
 export const metadata = {
     title: 'YullyHub — Loader',
     description: 'Live control surface for the C++ loader',
+    icons: {
+        icon: '/favicon.svg',
+    },
 };
 
 export default function RootLayout({ children }) {
