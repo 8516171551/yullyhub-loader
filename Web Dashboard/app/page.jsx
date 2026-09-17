@@ -434,32 +434,29 @@ export default function Page() {
 
     // ---- Flickity init ----
     // Re-initialise whenever the product list changes so new tiles render.
+    // NOTE: dropped the source's "shift subsequent slides by 75px on select"
+    // effect — it was an O(N) style.left mutation on every click that forced
+    // a full layout pass per selection. Standard flickity slide is snappy.
     useEffect(() => {
         if (!scriptsReady) return;
         if (typeof window === 'undefined' || !window.Flickity) return;
         const el = flickityElRef.current;
         if (!el) return;
-        // Destroy previous
         try { flickityRef.current?.destroy?.(); } catch {}
         const flkty = new window.Flickity(el, {
             contain: false,
             pageDots: false,
             prevNextButtons: false,
             percentPosition: false,
-            imagesLoaded: true,
+            imagesLoaded: false,      // no images inside — we use CSS bg
             cellAlign: 'left',
             draggable: true,
+            friction: 0.5,            // snappier settle
+            selectedAttraction: 0.18, // faster snap-to-cell
         });
         flickityRef.current = flkty;
 
-        const positions = flkty.cells.map((c) => parseInt(c.element.style.left, 10));
-        flkty.on('select', (index) => {
-            setSelected(index);
-            flkty.cells.forEach((slide, i) => { slide.element.style.left = positions[i] + 'px'; });
-            flkty.cells.slice(index + 1).forEach((slide, i) => {
-                slide.element.style.left = (positions[i + index + 1] + 75) + 'px';
-            });
-        });
+        flkty.on('select', (index) => { setSelected(index); });
         flkty.select(0, false, true);
         setSelected(0);
 
@@ -552,35 +549,35 @@ export default function Page() {
                     <div className="js-flickity games text-gray-50 font-extralight" ref={flickityElRef}>
                         {/* Yully profile tile — index 0 */}
                         <div className="slide icon">
-                            <img src="/YullyLogo.png" alt="Yully profile" />
+                            <div className="slide-icon-bg" style={{ backgroundImage: 'url(/YullyLogo.png)' }} />
                             <span>YullyHub Profile</span>
                         </div>
                         {list.map((p) => (
                             <div className="slide" key={p.id}>
                                 {p.imageName
-                                    ? <img src={`/api/products/${p.id}/image`} alt={p.name} />
+                                    ? <div className="slide-bg" style={{ backgroundImage: `url(/api/products/${p.id}/image)` }} />
                                     : <div className="slide-fallback">{(p.name || '?').slice(0, 2).toUpperCase()}</div>}
-                                <span>{p.name} | PC</span>
+                                <span>{p.name}</span>
                             </div>
                         ))}
                     </div>
                 </main>
 
-                {/* Footer 0 — YullyHub profile stats + panels */}
+                {/* Footer 0 — YullyHub profile: minimal, no trophy noise */}
                 <footer className={`mb-4 overflow-y-auto ${selected === 0 ? 'is-selected' : ''}`} data-slide-index="0">
-                    <section className="grid grid-cols-1">
-                        <div className="container-opacity container-opacity--light flex flex-wrap justify-around mb-1 space-x-2">
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Products</div><span className="text-white">{totalProducts}</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Scripted</div><span className="text-white">{scriptedCount}</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Completion</div><span className="text-white">{completionPct}%</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Launched</div><span className="text-white">{launchCount}</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Loaders</div><span className="text-white">{state.count}</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Rank</div><span className="text-white">#1</span></div>
-                            <div className="flex flex-col items-center text-center"><div className="text-gray-50 text-sm">Country</div><span className="text-white">#1</span></div>
+                    <section className="grid grid-cols-1 mb-2">
+                        <div className="container-opacity container-opacity--light rounded-borders flex flex-wrap justify-around">
+                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Products</div><span className="text-white text-lg">{totalProducts}</span></div>
+                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Scripted</div><span className="text-white text-lg">{scriptedCount}</span></div>
+                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Launched</div><span className="text-white text-lg">{launchCount}</span></div>
+                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Loaders</div><span className="text-white text-lg">{state.count}</span></div>
                         </div>
                     </section>
+                    <section className="container-opacity container-opacity--light rounded-borders text-white text-sm text-center py-6">
+                        Pick a product from the row above, then hit LAUNCH.
+                    </section>
 
-                    <section className="masonry-cols">
+                    <section className="masonry-cols" style={{ display: 'none' }}>
                         <div className="grid-item mb-1">
                             <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light">Profile summary</h3>
                             <div className="flex justify-center container-opacity container-opacity--light text-white">
@@ -678,13 +675,14 @@ export default function Page() {
                     </section>
                 </footer>
 
-                {/* One footer per product (indexes 1..N) */}
+                {/* One footer per product (indexes 1..N) — ALWAYS mounted,
+                    hidden via .is-selected so switching between tiles is
+                    instant (no remount, no image refetch, no layout thrash). */}
                 {list.map((p, i) => {
                     const idx = i + 1;
-                    if (selected !== idx) return null;
                     const scripted = Array.isArray(p.script) && p.script.length;
                     return (
-                        <footer key={p.id} className="mb-4 overflow-y-auto md:flex justify-between gap-1 is-selected" data-slide-index={idx}>
+                        <footer key={p.id} className={`mb-4 overflow-y-auto md:flex justify-between gap-1 ${selected === idx ? 'is-selected' : ''}`} data-slide-index={idx}>
                             <section className="info mb-1 md:mb-0">
                                 <div className="cover">
                                     {p.imageName

@@ -103,9 +103,10 @@ header a.profile-pic::before {
 /* =========================================================
    Footer / masonry (from source main.css)
    ========================================================= */
-footer { opacity: 0; z-index: 0; height: 0; }
-body.loaded footer { transition: opacity 0.5s ease; }
-footer.is-selected { opacity: 1; z-index: 1; height: auto; }
+/* All footers stack in the same grid-area; hide non-selected via display:none
+   so switching between products is instant (no fade, no layout thrash). */
+footer { display: none; }
+footer.is-selected { display: block; }
 
 /* CSS-columns masonry replacement — cleaner than the js one, same look */
 .masonry-cols {
@@ -200,78 +201,81 @@ footer .cover .cover-fallback {
 ::-webkit-scrollbar-thumb { background-color: #555555; }
 
 /* =========================================================
-   Flickity slide overrides — matches source (icons + game slides)
+   Flickity slide — fixed 140x140 tiles, background-image only.
+   Every tile identical shape/size so click-to-select is layout-free.
    ========================================================= */
-/* fallback layout — before Flickity initializes the row of slides is still
-   readable as a horizontal scroll strip. Flickity overrides these once loaded. */
 .js-flickity {
     outline: none;
     display: flex;
     overflow-x: auto;
     scrollbar-width: none;
     padding: 4px 0 12px;
+    min-height: 158px;
 }
 .js-flickity::-webkit-scrollbar { display: none; }
 .flickity-enabled { display: block; overflow: visible; }
+
 .js-flickity .slide {
-    margin-right: 15px;
+    margin-right: 14px;
     width: 140px;
     height: 140px;
     background: rgba(0, 0, 0, 0.35);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 2px solid transparent;
     border-radius: 6px;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: flex-end;
-    padding: 6px;
-    text-align: center;
+    padding: 0;
     cursor: pointer;
     outline: none;
-    transition: transform 200ms cubic-bezier(.2,.9,.3,1.1), border-color 200ms;
-    overflow: hidden;
     position: relative;
+    overflow: hidden;
+    will-change: transform;
+    contain: layout paint;
+    transition: transform 140ms cubic-bezier(.2,.9,.3,1.1), border-color 120ms;
 }
 .js-flickity .slide.is-selected {
-    border: 2px solid #fff;
-    transform: translateY(-6px) scale(1.02);
-}
-.js-flickity .slide img {
-    max-width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-radius: 4px;
+    border-color: #fff;
+    transform: translateY(-6px);
+    box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.6);
 }
 .js-flickity .slide.icon {
     background: linear-gradient(135deg, #1a2044, #0a0d1a);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    padding: 12px;
 }
-.js-flickity .slide.icon img {
-    height: 70%; width: auto; object-fit: contain;
-    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
-    margin-bottom: 6px;
-}
-.js-flickity .slide span {
-    display: block;
-    font-size: 10px;
-    color: #e5e7eb;
+
+/* Background image layer — fills the tile completely */
+.slide-bg, .slide-icon-bg {
     position: absolute;
-    left: 0; right: 0; bottom: 4px;
-    padding: 4px;
-    background: linear-gradient(0deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    inset: 0;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
 }
-.js-flickity .slide.icon span {
-    background: transparent;
-    position: static;
-    padding: 0;
+.slide-icon-bg {
+    background-size: 62% auto;
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
 }
+
 .js-flickity .slide-fallback {
-    width: 100%; height: 100%;
+    position: absolute; inset: 0;
     display: grid; place-items: center;
     background: linear-gradient(135deg, #1a2040, #0a0d1a);
-    font-size: 42px; font-weight: 700; color: rgba(255,255,255,0.65);
-    letter-spacing: 0.05em;
-    border-radius: 4px;
+    font-size: 46px; font-weight: 700;
+    color: rgba(255, 255, 255, 0.72);
+    letter-spacing: 0.04em;
+}
+
+/* Title bar over the bottom edge of every tile */
+.js-flickity .slide span {
+    display: block;
+    font-size: 11px;
+    color: #f3f4f6;
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 20px 8px 6px;
+    background: linear-gradient(0deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.35) 60%, transparent 100%);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    line-height: 1.2;
 }
 
 /* =========================================================
