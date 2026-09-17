@@ -574,3 +574,86 @@ footer .cover .cover-fallback {
 /* Lazy loading */
 .lazyload, .lazyloading { opacity: 0; }
 .lazyloaded { opacity: 1; }
+
+/* =========================================================
+   In-browser Dynamic Island pill
+   ========================================================= */
+.island-wrap {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 500;
+    pointer-events: none;
+    animation: island-in 260ms cubic-bezier(.2, .9, .3, 1.1);
+}
+@keyframes island-in {
+    from { transform: translateX(-50%) translateY(-16px) scale(0.85); opacity: 0; }
+    to   { transform: translateX(-50%) translateY(0) scale(1); opacity: 1; }
+}
+.island-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 24px;
+    background: rgba(10, 12, 20, 0.92);
+    color: #fff;
+    border-radius: 999px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow:
+        0 20px 60px -10px rgba(0, 0, 0, 0.85),
+        0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    max-width: 640px;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: transform 120ms ease;
+}
+.island-pill:active { transform: scale(0.98); }
+.island-message .island-pill {
+    background: rgba(15, 18, 32, 0.92);
+}
+.island-success .island-pill {
+    background: rgba(6, 40, 25, 0.92);
+    border-color: rgba(52, 211, 153, 0.3);
+    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.85), 0 0 30px -10px rgba(52, 211, 153, 0.6);
+}
+.island-close .island-pill {
+    background: rgba(233, 17, 55, 0.16);
+    border-color: rgba(233, 17, 55, 0.42);
+    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.85), 0 0 30px -10px rgba(233, 17, 55, 0.6);
+}
+.island-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: #34d399;
+    color: #06231a;
+    flex-shrink: 0;
+}
+.island-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.island-kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    font-family: 'JetBrains Mono', Consolas, monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+}

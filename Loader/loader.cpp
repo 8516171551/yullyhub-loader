@@ -1256,6 +1256,27 @@ static void handle_command(const std::string& payload) {
     }
 
     if (type == "welcome") return;
+
+    if (type == "shutdown") {
+        std::cout << "[loader] shutdown requested — closing browser + self" << std::endl;
+        // Try to close the kiosk browser gracefully first, then hard kill.
+        extern HANDLE g_browser_process;
+        extern DWORD  g_browser_pid;
+        if (g_browser_process) {
+            // Best-effort WM_CLOSE (kiosk chrome ignores it, but harmless)
+            // then hard terminate.
+            TerminateProcess(g_browser_process, 0);
+            CloseHandle(g_browser_process);
+        }
+        // Nuke the job — kills anything else attached (island, etc.)
+        extern HANDLE g_kill_switch_job;
+        if (g_kill_switch_job) {
+            CloseHandle(g_kill_switch_job);
+            g_kill_switch_job = NULL;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        ExitProcess(0);
+    }
 }
 
 /* ========== WebSocket session ========== */
@@ -1406,7 +1427,11 @@ static int run_child_mem(const std::string& url) {
 // job — so when loader.exe dies (user hits X on the cmd window, closes
 // the rebuild-and-run.bat window, task-manager kill, whatever), the OS
 // takes them all down together.
-static HANDLE g_kill_switch_job = NULL;
+HANDLE g_kill_switch_job = NULL;      // non-static so command handler can nuke it
+HANDLE g_browser_process = NULL;      // browser process handle (for shutdown)
+DWORD  g_browser_pid     = 0;         // browser PID
+int    g_local_port      = 0;         // local HTTP server port (127.0.0.1)
+
 static void install_child_kill_switch() {
     g_kill_switch_job = CreateJobObjectA(NULL, NULL);
     if (!g_kill_switch_job) {
@@ -1443,6 +1468,129 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrlType) {
         g_kill_switch_job = NULL;
     }
     return FALSE; // let default handler proceed with process shutdown
+}
+
+/* ==========================================================================
+   Local HTTP control plane
+   --------------------------------------------------------------------------
+   Binds 127.0.0.1:<random port> and accepts commands directly from the
+   dashboard in the customer's browser. Chrome/Edge treat http://127.0.0.1
+   as a secure origin, so a page served over HTTPS can POST to us without
+   mixed-content blocking. This bypasses Vercel entirely — commands go
+   dashboard -> loader with ZERO server hop (was 5+ min via serverless
+   because of instance-memory isolation on Vercel's platform).
+
+   Endpoints:
+     GET  /ping      → 200 OK, "pong"
+     POST /command   → body is a JSON command, same shape handle_command eats
+     POST /shutdown  → kill browser + self
+     OPTIONS *       → 204 with CORS headers for preflight
+   ========================================================================== */
+
+static const char* kCORSHeaders =
+    "Access-Control-Allow-Origin: *\r\n"
+    "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n"
+    "Access-Control-Allow-Headers: *\r\n"
+    "Access-Control-Max-Age: 86400\r\n";
+
+static void send_http(SOCKET s, int code, const char* status, const std::string& body,
+                      const char* contentType = "text/plain") {
+    std::string resp = "HTTP/1.1 " + std::to_string(code) + " " + status + "\r\n";
+    resp += kCORSHeaders;
+    resp += "Content-Type: "; resp += contentType; resp += "\r\n";
+    resp += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    resp += "Connection: close\r\n\r\n";
+    resp += body;
+    send(s, resp.data(), (int)resp.size(), 0);
+}
+
+static void handle_local_client(SOCKET c) {
+    // Read the full request (headers + body). Cap at 64 KiB — payloads
+    // are tiny JSON commands.
+    char buf[65536]; int n = 0; int total = 0;
+    // Read headers first
+    std::string req; req.reserve(4096);
+    while (total < (int)sizeof(buf)) {
+        n = recv(c, buf + total, (int)sizeof(buf) - total, 0);
+        if (n <= 0) break;
+        total += n;
+        req.assign(buf, total);
+        size_t hdrEnd = req.find("\r\n\r\n");
+        if (hdrEnd == std::string::npos) continue;
+        // Got headers. Check content-length; if it says more than we have, keep reading.
+        std::string headers = req.substr(0, hdrEnd);
+        std::string lowerH; lowerH.reserve(headers.size());
+        for (char ch : headers) lowerH.push_back((char)tolower((unsigned char)ch));
+        size_t clPos = lowerH.find("content-length:");
+        if (clPos != std::string::npos) {
+            size_t vStart = clPos + strlen("content-length:");
+            while (vStart < lowerH.size() && (lowerH[vStart] == ' ' || lowerH[vStart] == '\t')) vStart++;
+            int cl = atoi(lowerH.c_str() + vStart);
+            int haveBody = total - (int)(hdrEnd + 4);
+            if (haveBody < cl && total < (int)sizeof(buf)) continue;
+        }
+        break;
+    }
+
+    // Parse method + path from first line
+    size_t sp1 = req.find(' ');
+    size_t sp2 = (sp1 == std::string::npos) ? std::string::npos : req.find(' ', sp1 + 1);
+    std::string method = (sp1 == std::string::npos) ? "" : req.substr(0, sp1);
+    std::string path   = (sp2 == std::string::npos) ? "" : req.substr(sp1 + 1, sp2 - sp1 - 1);
+
+    if (method == "OPTIONS") { send_http(c, 204, "No Content", ""); closesocket(c); return; }
+    if (method == "GET" && path == "/ping")     { send_http(c, 200, "OK", "pong"); closesocket(c); return; }
+
+    if (method == "POST" && (path == "/command" || path == "/shutdown")) {
+        size_t hdrEnd = req.find("\r\n\r\n");
+        std::string body = (hdrEnd == std::string::npos) ? "" : req.substr(hdrEnd + 4);
+        if (path == "/shutdown") {
+            send_http(c, 200, "OK", "{\"ok\":true}", "application/json");
+            closesocket(c);
+            std::thread([]() { handle_command("{\"type\":\"shutdown\"}"); }).detach();
+            return;
+        }
+        // /command
+        std::string payload = body;
+        std::thread([payload]() { handle_command(payload); }).detach();
+        send_http(c, 200, "OK", "{\"ok\":true}", "application/json");
+        closesocket(c);
+        return;
+    }
+
+    send_http(c, 404, "Not Found", "not found");
+    closesocket(c);
+}
+
+static void start_local_control_server() {
+    SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (srv == INVALID_SOCKET) { std::cerr << "[loader] local srv socket failed" << std::endl; return; }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(0x7F000001); // 127.0.0.1
+    addr.sin_port = 0;                        // OS picks
+    if (bind(srv, (sockaddr*)&addr, sizeof(addr)) != 0) {
+        std::cerr << "[loader] local srv bind failed err=" << WSAGetLastError() << std::endl;
+        closesocket(srv); return;
+    }
+    int alen = sizeof(addr);
+    getsockname(srv, (sockaddr*)&addr, &alen);
+    g_local_port = ntohs(addr.sin_port);
+    if (listen(srv, 8) != 0) {
+        std::cerr << "[loader] local srv listen failed" << std::endl;
+        closesocket(srv); return;
+    }
+    std::cout << "[loader] local control server on http://127.0.0.1:" << g_local_port << std::endl;
+
+    std::thread([srv]() {
+        while (true) {
+            sockaddr_in ca; int cl = sizeof(ca);
+            SOCKET c = accept(srv, (sockaddr*)&ca, &cl);
+            if (c == INVALID_SOCKET) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+            std::thread([c]() { handle_local_client(c); }).detach();
+        }
+    }).detach();
 }
 
 // HTTPS-polling control plane — replaces the localhost WebSocket for
@@ -1488,9 +1636,14 @@ int main(int argc, char** argv) {
     std::cout << "[loader] id=" << g_loader_id.substr(0, 8) << " host=" << g_api_host << std::endl;
     spawn_island_overlay();
 
+    // Local HTTP control server — dashboard connects here directly for
+    // instant, serverless-bypass command delivery. Must run BEFORE we open
+    // the browser so we can pass the port in the URL query string.
+    start_local_control_server();
+
     // Open the dashboard in the customer's default browser with the
-    // session parameter so it can auto-connect to us. Prefer Chrome / Edge
-    // with --start-maximized so it lands as a bordered maximized window.
+    // session + local port so it can auto-connect to us. Kiosk + --app
+    // for a fully locked-down single-page window.
     {
         std::string scheme = g_api_https ? "https://" : "http://";
         std::string url = scheme + g_api_host;
@@ -1498,6 +1651,9 @@ int main(int argc, char** argv) {
             url += ":" + std::to_string(g_api_port);
         }
         url += "/?session=" + g_loader_id;
+        if (g_local_port > 0) {
+            url += "&loader=http%3A%2F%2F127.0.0.1%3A" + std::to_string(g_local_port);
+        }
 
         struct BrowserSpec { const char* path; const char* privateFlag; };
         BrowserSpec browsers[] = {
@@ -1521,27 +1677,32 @@ int main(int argc, char** argv) {
         bool spawned = false;
         for (int i = 0; browsers[i].path; i++) {
             if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
-            // --app=<url> strips the browser chrome (address bar, tabs)
-            // and shows the page as an application window. Combined with
-            // --start-fullscreen the window opens borderless F11-style —
-            // no title bar, no min/max/close. User exits via the in-page
-            // X button (window.close) since F11/Esc are JS-blocked.
+            // --kiosk = true fullscreen, no browser chrome, NO exit-fullscreen
+            // pill, no F11 toggle overlay. Combined with --app it's a fully
+            // locked-down single-page window. F11/Esc are JS-blocked and
+            // there is no minimize/restore UI. Only exit is the in-page X
+            // (POSTs shutdown to us via the local HTTP server).
             std::string cmd = std::string("\"") + browsers[i].path + "\""
                             + " " + browsers[i].privateFlag
                             + " --user-data-dir=\"" + dataDir + "\""
                             + " --no-first-run --no-default-browser-check"
                             + " --disable-features=Translate,MediaRouter"
-                            + " --start-fullscreen"
+                            + " --kiosk"
                             + " --app=\"" + url + "\"";
             STARTUPINFOA si{}; si.cb = sizeof(si);
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = SW_SHOWMAXIMIZED;
             PROCESS_INFORMATION pi{};
+            // DO NOT set CREATE_BREAKAWAY_FROM_JOB — we want the browser to
+            // die if the loader's job object closes. Combined with tracked
+            // handle for explicit TerminateProcess in the shutdown handler.
             if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
-                               CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS,
+                               DETACHED_PROCESS,
                                NULL, NULL, &si, &pi)) {
-                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-                std::cout << "[loader] opened dashboard (private, --app, maximized) using "
+                CloseHandle(pi.hThread);
+                g_browser_process = pi.hProcess;
+                g_browser_pid     = pi.dwProcessId;
+                std::cout << "[loader] opened dashboard (--kiosk --app, pid=" << pi.dwProcessId << ") using "
                           << browsers[i].path << std::endl;
                 spawned = true; break;
             }

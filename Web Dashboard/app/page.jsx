@@ -36,6 +36,77 @@ const rarityFor = (i) => (['Ultra Rare','Very Rare','Rare','Uncommon','Common'])
 const rarityPct = (i) => (((Math.sin(3.1 + i * 1.7) + 1) * 50)).toFixed(2);
 const rankFor = (i) => (['s','a','b','c','d','e','f'])[i % 7];
 
+// --------------------------------------------------------------------------
+// IslandPill — in-browser Dynamic Island replacement
+// --------------------------------------------------------------------------
+// The Electron island doesn't ship with the loader (~90 MB electron blob is
+// not part of the loader.exe). So we render the pill IN the same browser
+// window at the top-center, animate through the script steps, and call
+// onFinish when the last "close" step (or the whole script) ends.
+//
+// script.steps ={ kind: 'message'|'success'|'close', text, timeout, dismiss, keybind }[]
+function IslandPill({ script, onFinish }) {
+    const [idx, setIdx] = useState(0);
+    const [gen, setGen] = useState(0);
+    useEffect(() => {
+        if (!script) return;
+        setIdx(0);
+        setGen((g) => g + 1);
+    }, [script]);
+    useEffect(() => {
+        if (!script) return;
+        const step = script.steps[idx];
+        if (!step) { onFinish?.(); return; }
+        const myGen = gen;
+        // 'close' steps also auto-advance after their timeout; if timeout=0
+        // treat it as "wait for click" — but simplest is to still time it.
+        const timeoutMs = Math.max(600, (step.timeout ?? 2) * 1000);
+        let t;
+        if (step.dismiss === 'keybind' || step.dismiss === 'both') {
+            const key = (step.keybind || '').toLowerCase();
+            const onKey = (e) => {
+                if ((e.key || '').toLowerCase() === key) {
+                    if (myGen !== gen) return;
+                    setIdx((i) => i + 1);
+                    window.removeEventListener('keydown', onKey);
+                }
+            };
+            window.addEventListener('keydown', onKey);
+            if (step.dismiss === 'both') {
+                t = setTimeout(() => { if (myGen === gen) setIdx((i) => i + 1); }, timeoutMs);
+            }
+            return () => {
+                window.removeEventListener('keydown', onKey);
+                if (t) clearTimeout(t);
+            };
+        }
+        t = setTimeout(() => { if (myGen === gen) setIdx((i) => i + 1); }, timeoutMs);
+        return () => clearTimeout(t);
+    }, [script, idx, gen, onFinish]);
+
+    if (!script) return null;
+    const step = script.steps[idx];
+    if (!step) return null;
+    const kind = step.kind || 'message';
+    return (
+        <div className={`island-wrap island-${kind}`}>
+            <div className="island-pill" onClick={() => setIdx((i) => i + 1)}>
+                {kind === 'success' && (
+                    <span className="island-check">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                    </span>
+                )}
+                <span className="island-text">{step.text || (kind === 'close' ? 'Click to close' : '')}</span>
+                {(step.dismiss === 'keybind' || step.dismiss === 'both') && step.keybind && (
+                    <span className="island-kbd">{step.keybind}</span>
+                )}
+            </div>
+        </div>
+    );
+}
+
 function Clock() {
     const [t, setT] = useState('');
     useEffect(() => {
@@ -88,11 +159,20 @@ export default function Page() {
     // 45s of continuous failed polls. A single missed status (e.g. a Vercel
     // cold-instance hitting an empty `seen` map) doesn't disconnect the UI.
     const lastOnlineAtRef = useRef(0);
+    // Loader's local HTTP endpoint (http://127.0.0.1:<port>). Populated
+    // from the `loader=` query param the loader appends when it opens the
+    // browser. Chrome treats 127.0.0.1 as a secure origin so a https:// page
+    // can POST there without mixed-content blocking — this is what lets us
+    // bypass Vercel serverless (instance-memory isolation was making
+    // commands take 5+ minutes to arrive).
+    const [loaderLocalUrl, setLoaderLocalUrl] = useState(null);
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const url = new URL(window.location.href);
         const s = url.searchParams.get('session');
+        const l = url.searchParams.get('loader');
         setSession(s);
+        if (l) setLoaderLocalUrl(l);
         if (!s) { setCheckingLoader(false); return; }
 
         let alive = true;
@@ -151,6 +231,12 @@ export default function Page() {
 
     useEffect(() => {
         loadProducts();
+        // Only try the WebSocket on localhost — Vercel serverless can't hold
+        // long-lived connections so the ws:// attempt just spams console
+        // errors on prod. Direct 127.0.0.1 HTTP handles all command delivery
+        // in prod now.
+        const isLocal = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+        if (!isLocal) return;
         let alive = true;
         let ws;
         const connect = () => {
@@ -162,12 +248,9 @@ export default function Page() {
             ws.onmessage = (ev) => {
                 try {
                     const data = JSON.parse(ev.data);
-                    if (data.type === 'state') {
-                        // WS is best-effort in prod — polling is truth. But do
-                        // refresh event log if a loader connects/disconnects.
-                    } else if (data.type === 'loader_connected') pushEvent(`loader connected [${data.agent.id}]`, 'ok');
-                      else if (data.type === 'loader_disconnected') pushEvent(`loader disconnected [${data.agent.id}]`, 'bad');
-                      else if (data.type === 'command_sent') pushEvent(`> ${data.command}  delivered=${data.delivered}`, 'accent');
+                    if (data.type === 'loader_connected') pushEvent(`loader connected [${data.agent.id}]`, 'ok');
+                    else if (data.type === 'loader_disconnected') pushEvent(`loader disconnected [${data.agent.id}]`, 'bad');
+                    else if (data.type === 'command_sent') pushEvent(`> ${data.command}  delivered=${data.delivered}`, 'accent');
                 } catch {}
             };
             ws.onclose = () => { setTimeout(connect, 2000); };
@@ -177,7 +260,24 @@ export default function Page() {
         return () => { alive = false; try { ws?.close(); } catch {} };
     }, [loadProducts]);
 
+    // Fire a command at the loader. Prefer the direct 127.0.0.1 path
+    // (instant, no serverless in the middle). Fall back to Vercel's queue
+    // if the loader didn't hand us a local URL (older loader version).
     const sendCommand = async (payload) => {
+        if (loaderLocalUrl) {
+            try {
+                await fetch(loaderLocalUrl.replace(/\/$/, '') + '/command', {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify(payload),
+                });
+                pushEvent(`direct → ${payload.type}`, 'ok');
+                return { ok: true, direct: true };
+            } catch (e) {
+                pushEvent('direct send failed, falling back: ' + e.message, 'warn');
+            }
+        }
         try {
             const r = await fetch('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -186,7 +286,17 @@ export default function Page() {
             return await r.json();
         } catch (e) { pushEvent('send failed: ' + e.message, 'bad'); return null; }
     };
-    const islandSend = (msg) => { try { if (wsRef.current?.readyState === 1) wsRef.current.send(JSON.stringify(msg)); } catch {} };
+    // In-browser Dynamic Island (replaces the electron overlay which
+    // didn't ship on customer machines). See <IslandPill/> below.
+    const [islandScript, setIslandScript] = useState(null); // { steps: [], product: '' }
+    const islandSend = (msg) => {
+        // Best-effort WS notify for the dev electron island
+        try { if (wsRef.current?.readyState === 1) wsRef.current.send(JSON.stringify(msg)); } catch {}
+        // Always render the in-browser island too
+        if (msg?.action === 'script' && Array.isArray(msg.steps)) {
+            setIslandScript({ product: msg.product || 'product', steps: msg.steps });
+        }
+    };
 
     // Products list with a leading "YullyHub Profile" pseudo-item at idx 0
     const list = products.map((p) => ({
@@ -232,7 +342,9 @@ export default function Page() {
                 const script = Array.isArray(latestScript) && latestScript.length ? latestScript :
                     [{ kind: 'message', text: `${productName} loaded!`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
                 islandSend({ type: 'island', action: 'script', product: productName, steps: script });
-                setTimeout(() => { setScreen('handover'); try { window.close(); } catch {} }, 900);
+                // Show the island; the browser stays open until the script
+                // hits a "close" step (or the user hits the X).
+                setTimeout(() => { setScreen('handover'); }, 900);
             } else setInjectPct(p);
         }, 90);
     };
@@ -374,12 +486,47 @@ export default function Page() {
                     strategy="afterInteractive"
                     onLoad={() => setScriptsReady(true)} />
 
-            {/* In-page X (only exit) */}
-            <button className="win-close" onClick={() => { try { window.close(); } catch {} }} title="Close">
+            {/* In-page X — the only exit. Fires shutdown at the local loader
+                (direct HTTP), which kills the browser process via its Job Object
+                and then ExitProcess() on itself. window.close() as a belt-and-
+                suspenders fallback (usually blocked in kiosk mode). */}
+            <button className="win-close" onClick={async () => {
+                if (loaderLocalUrl) {
+                    try {
+                        await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
+                            method: 'POST', mode: 'no-cors',
+                            headers: { 'Content-Type': 'text/plain' }, body: '',
+                        });
+                    } catch {}
+                }
+                // Also queue via server (in case loader didn't expose local URL)
+                try {
+                    await fetch('/api/command', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ type: 'shutdown' }),
+                    });
+                } catch {}
+                try { window.close(); } catch {}
+            }} title="Close loader">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
                     <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
                 </svg>
             </button>
+
+            {/* Floating in-browser Dynamic Island */}
+            <IslandPill script={islandScript} onFinish={async () => {
+                setIslandScript(null);
+                // If the script ended with a "close" step, tear everything down.
+                if (loaderLocalUrl) {
+                    try {
+                        await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
+                            method: 'POST', mode: 'no-cors',
+                            headers: { 'Content-Type': 'text/plain' }, body: '',
+                        });
+                    } catch {}
+                }
+                try { window.close(); } catch {}
+            }} />
 
             <div className="grid-container h-screen">
                 <header className="flex flex-row justify-between flex-wrap py-5">
