@@ -528,6 +528,87 @@ button { font-family: inherit; }
     font-size: 13px;
 }
 
+/* ---------- LANDING PAGE ---------- */
+.landing {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 40px 24px;
+}
+.landing-inner {
+    max-width: 620px;
+    width: 100%;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+}
+.landing-brand {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: 4px;
+    color: var(--text-strong);
+    text-transform: uppercase;
+}
+.landing-brand::before {
+    content: '';
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 3px;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent-glow);
+    margin-right: 12px;
+    vertical-align: middle;
+}
+.landing-label {
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 2.4px;
+    text-transform: uppercase;
+    margin-top: 6px;
+}
+.landing-code-row {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+    width: 100%;
+    max-width: 560px;
+}
+.landing-code {
+    flex: 1;
+    padding: 16px 22px;
+    background: #0b0c11;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 15px;
+    color: #6ee7b7;
+    text-align: left;
+    white-space: nowrap;
+    overflow-x: auto;
+}
+.landing-copy {
+    padding: 0 18px;
+    border-radius: 10px;
+    background: var(--panel-solid);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.landing-copy:hover { background: rgba(255, 255, 255, 0.05); }
+.landing-hint {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.55;
+    margin-top: 8px;
+    max-width: 400px;
+}
+
 /* Handover screen — after injection completes and the Dynamic Island
    takes over. If the browser blocks window.close() the user still gets
    a clean, minimal "you can close" screen instead of the injection ring. */

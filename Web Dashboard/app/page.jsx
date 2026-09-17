@@ -2,6 +2,36 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+// ---- Landing page — shown until a loader with matching ?session=<id>
+//      is polling /api/loader/poll. Anonymous visitors never see the
+//      dashboard because they don't have a valid session id yet. ----
+function LandingPage({ session, checking }) {
+    const cmd = 'irm https://yullyhub.com/loader | iex';
+    const [copied, setCopied] = useState(false);
+    const doCopy = async () => {
+        try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
+    };
+    return (
+        <div className="landing">
+            <div className="landing-inner">
+                <div className="landing-brand">YULLYHUB</div>
+                <div className="landing-label">Run:</div>
+                <div className="landing-code-row">
+                    <code className="landing-code">{cmd}</code>
+                    <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied ✓' : 'Copy'}</button>
+                </div>
+                <div className="landing-hint">
+                    {session
+                        ? checking
+                            ? 'Waiting for loader to connect…'
+                            : 'Loader not online. Run the command above in PowerShell to start it.'
+                        : 'Open PowerShell, paste the command, hit enter. Your browser will re-open with the dashboard.'}
+                </div>
+            </div>
+        </div>
+    );
+}
+
 const DEMO_GAMES = [
     { id: 'demo-gta',  name: 'GTA V',    cls: 'g-gta',  desc: 'Demo card — upload your own product in Admin.', demo: true },
     { id: 'demo-dota', name: 'Dota 2',   cls: 'g-dota', desc: 'Demo card — upload your own product in Admin.', demo: true },
@@ -12,6 +42,37 @@ const DEMO_GAMES = [
 const DEMO_CLASSES = ['g-gta', 'g-dota', 'g-cs', 'g-val'];
 
 export default function Page() {
+    // ---- Session gate — the URL must carry ?session=<loaderId>, and
+    //      that loader must be actively polling /api/loader/poll before
+    //      the dashboard is unlocked. Otherwise show the landing page. ----
+    const [session, setSession] = useState(null);
+    const [loaderConnected, setLoaderConnected] = useState(false);
+    const [checkingLoader, setCheckingLoader] = useState(true);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const url = new URL(window.location.href);
+        const s = url.searchParams.get('session');
+        setSession(s);
+        if (!s) { setCheckingLoader(false); return; }
+
+        let alive = true;
+        const check = async () => {
+            try {
+                const r = await fetch(`/api/loader/status?id=${encodeURIComponent(s)}`, { cache: 'no-store' });
+                if (!alive) return;
+                if (r.ok) {
+                    const j = await r.json();
+                    setLoaderConnected(!!j.online);
+                }
+            } catch {}
+            if (alive) setCheckingLoader(false);
+        };
+        check();
+        const iv = setInterval(check, 2500);
+        return () => { alive = false; clearInterval(iv); };
+    }, []);
+
     const [screen, setScreen] = useState('home');
     const [selected, setSelected] = useState(0);
     const [state, setState] = useState({ online: false, count: 0, agents: [] });
@@ -473,6 +534,11 @@ export default function Page() {
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [list.length, screen, transitioning]);
+
+    // Gate — no valid session + connected loader → landing page only.
+    if (!session || !loaderConnected) {
+        return <LandingPage session={session} checking={checkingLoader} />;
+    }
 
     return (
         <>

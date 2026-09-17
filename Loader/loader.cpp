@@ -1414,7 +1414,11 @@ static void install_child_kill_switch() {
         return;
     }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
-    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // Allow explicit breakaway so we can spawn the browser as an outlived
+    // process — everything else that DOESN'T set CREATE_BREAKAWAY_FROM_JOB
+    // still gets killed with us (electron island, product hosts, etc.)
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                                          | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     if (!SetInformationJobObject(g_kill_switch_job,
                                  JobObjectExtendedLimitInformation,
                                  &jeli, sizeof(jeli))) {
@@ -1483,6 +1487,48 @@ int main(int argc, char** argv) {
     }
     std::cout << "[loader] id=" << g_loader_id.substr(0, 8) << " host=" << g_api_host << std::endl;
     spawn_island_overlay();
+
+    // Open the dashboard in the customer's default browser with the
+    // session parameter so it can auto-connect to us. Prefer Chrome / Edge
+    // with --start-maximized so it lands as a bordered maximized window.
+    {
+        std::string scheme = g_api_https ? "https://" : "http://";
+        std::string url = scheme + g_api_host;
+        if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80)) {
+            url += ":" + std::to_string(g_api_port);
+        }
+        url += "/?session=" + g_loader_id;
+
+        const char* browsers[] = {
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+            nullptr
+        };
+        bool spawned = false;
+        for (int i = 0; browsers[i]; i++) {
+            if (GetFileAttributesA(browsers[i]) == INVALID_FILE_ATTRIBUTES) continue;
+            std::string cmd = std::string("\"") + browsers[i] +
+                              "\" --start-maximized --new-window \"" + url + "\"";
+            STARTUPINFOA si{}; si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWMAXIMIZED;
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
+                               CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS,
+                               NULL, NULL, &si, &pi)) {
+                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                std::cout << "[loader] opened dashboard in browser (maximized)" << std::endl;
+                spawned = true; break;
+            }
+        }
+        if (!spawned) {
+            // Fallback — default browser via shell association
+            ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWMAXIMIZED);
+            std::cout << "[loader] opened dashboard in default browser" << std::endl;
+        }
+    }
 
     // On localhost (dev), keep the legacy WebSocket path — it's a lot
     // lower-latency for the operator on the same machine. On any public
