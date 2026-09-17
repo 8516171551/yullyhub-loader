@@ -13,7 +13,9 @@ function LandingPage({ session, checking }) {
     };
     return (
         <div className="landing">
+            <div className="stars" aria-hidden="true"></div>
             <div className="landing-inner">
+                <img className="landing-logo" src="/YullyLogo.png" alt="YullyHub" />
                 <div className="landing-brand">YULLYHUB</div>
                 <div className="landing-label">Run:</div>
                 <div className="landing-code-row">
@@ -41,6 +43,38 @@ const DEMO_GAMES = [
 
 const DEMO_CLASSES = ['g-gta', 'g-dota', 'g-cs', 'g-val'];
 
+// Rarity tags cycled across products for the tables (visual only)
+const RARITY_TIERS = [
+    { key: 'ultra',   label: 'Ultra Rare' },
+    { key: 'veryrare',label: 'Very Rare' },
+    { key: 'rare',    label: 'Rare' },
+    { key: 'uncommon',label: 'Uncommon' },
+    { key: 'common',  label: 'Common' },
+];
+const rarityFor = (idx) => RARITY_TIERS[idx % RARITY_TIERS.length];
+const rarityPercent = (idx) => {
+    // stable-ish pseudo random percent per index
+    const seed = 3.14 + idx * 1.71;
+    const v = (Math.sin(seed) + 1) * 50; // 0..100
+    return v.toFixed(2);
+};
+
+function Clock() {
+    const [now, setNow] = useState('');
+    useEffect(() => {
+        const tick = () => {
+            const d = new Date();
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+            setNow(`${hh}:${mm}`);
+        };
+        tick();
+        const iv = setInterval(tick, 15_000);
+        return () => clearInterval(iv);
+    }, []);
+    return <span className="psn-clock">{now}</span>;
+}
+
 export default function Page() {
     // ---- Session gate — the URL must carry ?session=<loaderId>, and
     //      that loader must be actively polling /api/loader/poll before
@@ -58,21 +92,21 @@ export default function Page() {
             const alt   = e.altKey;
 
             const isBad =
-                k === 'f5'      ||   // reload
-                k === 'f11'     ||   // fullscreen toggle
-                k === 'f12'     ||   // devtools
-                k === 'escape'  ||   // leave fullscreen / dismiss
-                (ctrl && k === 'r')                  ||   // reload
-                (ctrl && k === 'w')                  ||   // close tab
-                (ctrl && k === 't')                  ||   // new tab
-                (ctrl && k === 'n')                  ||   // new window
-                (ctrl && k === 'u')                  ||   // view source
-                (ctrl && k === 's')                  ||   // save page
-                (ctrl && k === 'p')                  ||   // print
-                (ctrl && k === 'j')                  ||   // downloads
-                (ctrl && k === 'h')                  ||   // history
-                (ctrl && shift && (k === 'i' || k === 'j' || k === 'c' || k === 'r')) || // devtools / hard reload
-                (alt  && (k === 'arrowleft' || k === 'arrowright'));   // browser back/forward
+                k === 'f5'      ||
+                k === 'f11'     ||
+                k === 'f12'     ||
+                k === 'escape'  ||
+                (ctrl && k === 'r') ||
+                (ctrl && k === 'w') ||
+                (ctrl && k === 't') ||
+                (ctrl && k === 'n') ||
+                (ctrl && k === 'u') ||
+                (ctrl && k === 's') ||
+                (ctrl && k === 'p') ||
+                (ctrl && k === 'j') ||
+                (ctrl && k === 'h') ||
+                (ctrl && shift && (k === 'i' || k === 'j' || k === 'c' || k === 'r')) ||
+                (alt  && (k === 'arrowleft' || k === 'arrowright'));
 
             if (isBad) {
                 e.preventDefault();
@@ -82,10 +116,8 @@ export default function Page() {
             }
         };
         const blockCtx = (e) => { e.preventDefault(); e.stopPropagation(); return false; };
-        // capture-phase so we intercept BEFORE any react-router / element handler
         document.addEventListener('keydown', blockKey, true);
         document.addEventListener('contextmenu', blockCtx, true);
-        // pin the history so browser back can't leave the app
         try { window.history.pushState(null, '', window.location.href); } catch {}
         const popBlock = () => { try { window.history.pushState(null, '', window.location.href); } catch {} };
         window.addEventListener('popstate', popBlock);
@@ -113,14 +145,7 @@ export default function Page() {
                     const j = await r.json();
                     const online = !!j.online;
                     if (online) hasSeenOnline = true;
-                    // Once a loader has been seen, keep the dashboard
-                    // unlocked even if a later status poll misses (Vercel
-                    // serverless can route to a cold instance whose
-                    // in-memory `seen` Map is empty — that would flap the
-                    // UI otherwise).
                     setLoaderConnected(hasSeenOnline);
-                    // Also sync the topbar's "N loader(s) online" pill,
-                    // which used to be driven only by the WebSocket.
                     setState((prev) => ({
                         ...prev,
                         online,
@@ -145,6 +170,7 @@ export default function Page() {
     const [products, setProducts] = useState([]);
     const [busy, setBusy] = useState(false);
     const [upload, setUpload] = useState({ exe: null, image: null, title: '' });
+    const [launchCount, setLaunchCount] = useState(0);
     const wsRef = useRef(null);
 
     const pushEvent = (msg, cls = '') => {
@@ -166,8 +192,6 @@ export default function Page() {
         let ws;
         const connect = () => {
             if (!alive) return;
-            // Auto-pick ws vs wss based on the page scheme so we don't
-            // trip mixed-content on Vercel (https → wss).
             const scheme = (location.protocol === 'https:') ? 'wss' : 'ws';
             ws = new WebSocket(`${scheme}://${location.host}/ws-ui`);
             wsRef.current = ws;
@@ -199,7 +223,6 @@ export default function Page() {
         return () => { alive = false; ws?.close(); };
     }, [loadProducts]);
 
-    // ---- Fire command ----
     const sendCommand = async (payload) => {
         try {
             const r = await fetch('/api/command', {
@@ -222,9 +245,6 @@ export default function Page() {
         } catch {}
     };
 
-    // `overrideIdx` bypasses the (stale) `selected` state — pass the index
-    // of the card you actually clicked so the closure doesn't fire on the
-    // previously-selected product.
     const handleStart = async (overrideIdx) => {
         const list = getVisibleList();
         const idx = (typeof overrideIdx === 'number') ? overrideIdx : safeSelected;
@@ -234,6 +254,7 @@ export default function Page() {
         setScreen('inject');
         setInjectPct(0);
         setInjectStatus('Processing...');
+        setLaunchCount(c => c + 1);
 
         const productName = target.name || target.title || 'product';
 
@@ -241,9 +262,6 @@ export default function Page() {
             sendCommand({ type: 'ping' });
         } else {
             const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
-            // Mint an exchange token so the launched product can handshake
-            // with /api/auth/handshake and confirm the user's subscription.
-            // See Loader/examples/auth_handshake.cpp for the client side.
             let token = null;
             try {
                 const r = await fetch('/api/auth/exchange', {
@@ -274,8 +292,6 @@ export default function Page() {
                 apiHost:   `${location.protocol}//${location.host}`,
             });
         }
-        // Fetch the LATEST script for this product before running the
-        // injection ring so we never miss an edit the user just made.
         let latestScript = Array.isArray(target.script) ? target.script : null;
         if (!target.demo) {
             try {
@@ -295,8 +311,6 @@ export default function Page() {
                 clearInterval(iv);
                 setInjectStatus('Injection complete.');
                 setInjectPct(100);
-                // Send the product's script to the Island so it starts
-                // playing the customer-facing instructions.
                 const script = Array.isArray(latestScript) && latestScript.length
                     ? latestScript
                     : [{ kind: 'message', text: `${productName} loaded successfully!`, dismiss: 'timeout', timeout: 2.5 },
@@ -309,10 +323,6 @@ export default function Page() {
                     steps: script,
                 });
 
-                // Once the island is in charge, hide the dashboard.
-                // Browsers block window.close() on tabs the user opened
-                // manually — if that fails we drop the UI to a subtle
-                // "dynamic island active" placeholder so nothing distracts.
                 setTimeout(() => {
                     setScreen('handover');
                     try { window.close(); } catch {}
@@ -323,7 +333,6 @@ export default function Page() {
         }, 90);
     };
 
-    // ---- Upload ----
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!upload.exe) { pushEvent('pick an .exe first', 'bad'); return; }
@@ -350,10 +359,6 @@ export default function Page() {
         setBusy(false);
     };
 
-    // ---- Update existing product ----
-    // Replace one or more of {exe, image, title}. Keeps the same product id
-    // and /api/products/<id>/exe URL, so every subsequent loader launch
-    // pulls the NEW bytes fresh (no caching anywhere).
     const updateProduct = async (id, { exe, image, title } = {}) => {
         setBusy(true);
         const form = new FormData();
@@ -383,48 +388,32 @@ export default function Page() {
         const el = document.createElement('input');
         el.type = 'file';
         el.accept = '.exe,application/x-msdownload,application/octet-stream';
-        el.onchange = async () => {
-            const f = el.files?.[0];
-            if (f) await updateProduct(id, { exe: f });
-        };
+        el.onchange = async () => { const f = el.files?.[0]; if (f) await updateProduct(id, { exe: f }); };
         el.click();
     };
-
     const pickAndUpdateImage = (id) => {
         const el = document.createElement('input');
         el.type = 'file';
         el.accept = 'image/*';
-        el.onchange = async () => {
-            const f = el.files?.[0];
-            if (f) await updateProduct(id, { image: f });
-        };
+        el.onchange = async () => { const f = el.files?.[0]; if (f) await updateProduct(id, { image: f }); };
         el.click();
     };
 
     // ---- SCRIPT EDITOR ----
-    // A script is an ordered list of steps the Dynamic Island plays after
-    // the product finishes loading. See PUT /api/products/[id] for the shape.
-    const [scriptEditor, setScriptEditor] = useState(null); // { id, title, steps }
+    const [scriptEditor, setScriptEditor] = useState(null);
     const openScriptEditor = (product) => {
         const existing = Array.isArray(product.script) ? product.script : [];
         const cloned = existing.length ? existing : [
-            { kind: 'message', text: 'Press F2 once you are in game',
-              dismiss: 'keybind', keybind: 'F2', timeout: 30 },
-            { kind: 'message', text: 'Injecting Product…',
-              dismiss: 'timeout', timeout: 3 },
+            { kind: 'message', text: 'Press F2 once you are in game', dismiss: 'keybind', keybind: 'F2', timeout: 30 },
+            { kind: 'message', text: 'Injecting Product…', dismiss: 'timeout', timeout: 3 },
             { kind: 'success', text: 'Product Injected Successfully', timeout: 2.5 },
             { kind: 'close', text: 'Click me to close loader', timeout: 4 },
         ];
-        // Reset the "last-saved" watermark so the auto-save effect will
-        // PUT the current buffer even if it happens to equal the previous
-        // session's contents.
         _lastSavedRef.current = existing.length ? JSON.stringify(existing) : '';
         setScriptSaveState('idle');
         setScriptEditor({ id: product.id, title: product.title, steps: cloned });
     };
-    const updateStep = (idx, patch) => setScriptEditor(s =>
-        s ? { ...s, steps: s.steps.map((st, i) => i === idx ? { ...st, ...patch } : st) } : s
-    );
+    const updateStep = (idx, patch) => setScriptEditor(s => s ? { ...s, steps: s.steps.map((st, i) => i === idx ? { ...st, ...patch } : st) } : s);
     const addStep = (kind) => setScriptEditor(s => {
         if (!s) return s;
         let base;
@@ -433,9 +422,7 @@ export default function Page() {
         else                       base = { kind: 'message', text: 'Type message…', dismiss: 'timeout', timeout: 2 };
         return { ...s, steps: [...s.steps, base] };
     });
-    const removeStep = (idx) => setScriptEditor(s =>
-        s ? { ...s, steps: s.steps.filter((_, i) => i !== idx) } : s
-    );
+    const removeStep = (idx) => setScriptEditor(s => s ? { ...s, steps: s.steps.filter((_, i) => i !== idx) } : s);
     const moveStep = (idx, dir) => setScriptEditor(s => {
         if (!s) return s;
         const j = idx + dir;
@@ -444,11 +431,8 @@ export default function Page() {
         [steps[idx], steps[j]] = [steps[j], steps[idx]];
         return { ...s, steps };
     });
-    // Auto-save script edits back to the server (debounced). No manual
-    // "SAVE" button — you can't forget it. `_savedRef` remembers the last
-    // JSON we PUT so we don't spam the network with identical bodies.
     const _lastSavedRef = useRef('');
-    const [scriptSaveState, setScriptSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved'
+    const [scriptSaveState, setScriptSaveState] = useState('idle');
     useEffect(() => {
         if (!scriptEditor) return;
         const body = JSON.stringify(scriptEditor.steps);
@@ -492,7 +476,6 @@ export default function Page() {
         await loadProducts();
     };
 
-    // ---- Combined list for home carousel ----
     const getVisibleList = () => {
         if (products.length > 0) {
             return products.map((p, i) => ({
@@ -509,99 +492,23 @@ export default function Page() {
     const safeSelected = Math.min(selected, list.length - 1);
     const g = list[safeSelected] || list[0];
 
-    // Reset selected when list shrinks
     useEffect(() => {
         if (selected >= list.length && list.length > 0) setSelected(0);
     }, [list.length, selected]);
-
-    // ---- 5-slot horizontal carousel ------------------------------------
-    // Each card renders with a data-slot attribute (-2 -1 0 1 2 | hidden).
-    // The whole INNER track translates by dragDelta during a live drag so
-    // every card slides with the pointer. On release past DRAG_TRIGGER we
-    // commit a switch and the track eases into the new centre.
-    const dragRef = useRef({ dragging: false, startX: 0 });
-    const [dragging, setDragging]           = useState(false);
-    const [dragDelta, setDragDelta]         = useState(0);
-    const [transitioning, setTransitioning] = useState(false);
-
-    const CARD_STEP    = 208;
-    const DRAG_TRIGGER = 80;
-    const SWITCH_MS    = 650;
-
-    // Slot for a given index — circular, values in [-2..2] or 'hidden'
-    const slotFor = (idx) => {
-        const n = list.length;
-        if (n === 0) return 'hidden';
-        let d = ((idx - safeSelected) + n) % n;
-        if (d > n / 2) d -= n;
-        return Math.abs(d) > 2 ? 'hidden' : String(d);
-    };
-
-    const commitSwitch = (dir) => {
-        if (transitioning || list.length === 0) return;
-        setTransitioning(true);
-        setSelected((s) => (s + dir + list.length) % list.length);
-        setDragDelta(0);
-        setTimeout(() => setTransitioning(false), SWITCH_MS);
-    };
-
-    const onCarouselDown = (e) => {
-        if (transitioning || list.length === 0) return;
-        const x = e.clientX ?? e.touches?.[0]?.clientX;
-        if (x == null) return;
-        dragRef.current = { dragging: true, startX: x };
-        setDragging(true);
-    };
-    const onCarouselMove = (e) => {
-        if (!dragRef.current.dragging) return;
-        const x = e.clientX ?? e.touches?.[0]?.clientX;
-        if (x == null) return;
-        let d = x - dragRef.current.startX;
-        // Rubber-band past ±1.5 * step so the drag feels weighty
-        const cap = CARD_STEP * 1.5;
-        if (d >  cap) d =  cap + (d - cap) * 0.15;
-        if (d < -cap) d = -cap + (d + cap) * 0.15;
-        setDragDelta(d);
-    };
-    const onCarouselUp = () => {
-        if (!dragRef.current.dragging) return;
-        dragRef.current.dragging = false;
-        setDragging(false);
-        const d = dragDelta;
-        if (Math.abs(d) < DRAG_TRIGGER || list.length === 0) {
-            setDragDelta(0);
-            return;
-        }
-        commitSwitch(d < 0 ? 1 : -1);
-    };
-
-    useEffect(() => {
-        window.addEventListener('mousemove', onCarouselMove);
-        window.addEventListener('mouseup',   onCarouselUp);
-        window.addEventListener('touchmove', onCarouselMove, { passive: true });
-        window.addEventListener('touchend',  onCarouselUp);
-        return () => {
-            window.removeEventListener('mousemove', onCarouselMove);
-            window.removeEventListener('mouseup',   onCarouselUp);
-            window.removeEventListener('touchmove', onCarouselMove);
-            window.removeEventListener('touchend',  onCarouselUp);
-        };
-    }, [list.length, dragDelta, transitioning]);
-
-    useEffect(() => {
-        const onKey = (e) => {
-            if (screen !== 'home') return;
-            if (e.key === 'ArrowLeft')  commitSwitch(-1);
-            if (e.key === 'ArrowRight') commitSwitch( 1);
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, [list.length, screen, transitioning]);
 
     // Gate — no valid session + connected loader → landing page only.
     if (!session || !loaderConnected) {
         return <LandingPage session={session} checking={checkingLoader} />;
     }
+
+    // ---- derived "PSN stats" from products/events ----
+    const totalProducts   = list.filter(p => !p.demo).length || list.length;
+    const scriptedCount   = list.filter(p => Array.isArray(p.script) && p.script.length).length;
+    const completion      = totalProducts ? Math.round((scriptedCount / totalProducts) * 100) : 0;
+    const rarestProducts  = list.slice(0, 6);
+    const recentProducts  = list.slice(0, 6);
+    const cabinetProducts = list.slice(0, 6);
+    const milestoneProducts = list.slice(0, 5);
 
     return (
         <>
@@ -611,384 +518,392 @@ export default function Page() {
                         <stop offset="0%" stopColor="#e91e63" />
                         <stop offset="100%" stopColor="#ff4020" />
                     </linearGradient>
+                    <linearGradient id="plat" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor="#a9c4ff" /><stop offset="100%" stopColor="#3e5fb3" />
+                    </linearGradient>
                 </defs>
             </svg>
 
-            <div className="app">
-                <aside className="sidebar">
-                    <div className="sidebar-brand">Y</div>
-                    <div className="sidebar-thread">
-                        <button
-                            className={`sidebar-nav-btn ${screen === 'home' ? 'active' : ''}`}
-                            onClick={() => setScreen('home')}
-                            title="Home"
-                        >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
-                        </button>
-                        <button
-                            className={`sidebar-nav-btn ${screen === 'admin' ? 'active' : ''}`}
-                            onClick={() => setScreen('admin')}
-                            title="Admin — upload products"
-                        >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M4 21h16"/></svg>
-                        </button>
-                        <button
-                            className={`sidebar-nav-btn ${screen === 'settings' ? 'active' : ''}`}
-                            onClick={() => setScreen('settings')}
-                            title="Settings"
-                        >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-                        </button>
-                        <button
-                            className={`sidebar-nav-btn ${screen === 'login' ? 'active' : ''}`}
-                            onClick={() => setScreen('login')}
-                            title="Account"
-                        >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                        </button>
-                    </div>
-                    <div className="sidebar-footer" title="YullyHub">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>
-                    </div>
-                </aside>
+            <div className="psn">
+                <div className="stars" aria-hidden="true"></div>
 
-                <main className="main-col">
-                    <div className="topbar">
-                        <div className="brand-mark">YULLYHUB</div>
-                        <div className="top-actions">
-                            <div className="status-pill">
-                                <span className={`pulse-dot ${state.online ? 'on' : ''}`}></span>
-                                {state.online ? `${state.count} loader${state.count === 1 ? '' : 's'} online` : 'no loader'}
-                            </div>
-                            <button className="icon-btn" title="Minimize">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            </button>
-                            <button className="icon-btn" title="Close" onClick={() => window.close?.()}>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
-                            </button>
+                {/* top-right in-page X — the only exit since browser chrome is hidden */}
+                <button className="win-close" onClick={() => { try { window.close(); } catch {} }} title="Close">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                        <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                    </svg>
+                </button>
+
+                <header className="psn-header">
+                    <div className="psn-brand">
+                        <img className="psn-logo" src="/YullyLogo.png" alt="YullyHub" />
+                        <div className="psn-titles">
+                            <div className="psn-name">YullyHub</div>
+                            <div className="psn-tag">Loader Interface</div>
                         </div>
                     </div>
+                    <nav className="psn-nav">
+                        <button className={`psn-tab ${screen === 'home' ? 'on' : ''}`}     onClick={() => setScreen('home')}>Products</button>
+                        <button className={`psn-tab ${screen === 'admin' ? 'on' : ''}`}    onClick={() => setScreen('admin')}>Admin</button>
+                        <button className={`psn-tab ${screen === 'settings' ? 'on' : ''}`} onClick={() => setScreen('settings')}>Settings</button>
+                        <button className={`psn-tab ${screen === 'login' ? 'on' : ''}`}    onClick={() => setScreen('login')}>Account</button>
+                    </nav>
+                    <div className="psn-header-right">
+                        <div className="psn-status">
+                            <span className={`psn-dot ${state.online ? 'on' : ''}`}></span>
+                            {state.online ? 'Loader online' : 'no loader'}
+                        </div>
+                        <Clock />
+                    </div>
+                </header>
 
-                    <div className="main">
-                    {screen === 'home' && (
-                        <section className="screen home-inner" key="home">
-                            <div className="grid-heading">
-                                <div>
-                                    <div className="title">Products</div>
-                                    <div className="subtitle">Click Start on any card to launch</div>
-                                </div>
-                                <div className="subtitle">{list.length} available</div>
-                            </div>
-
-                            {list.length === 0 ? (
-                                <div className="empty-state">
-                                    No products yet. Upload one in Admin.
-                                </div>
-                            ) : (
-                                <div className="card-grid">
-                                    {list.map((game, idx) => {
-                                        const isActive = idx === safeSelected;
-                                        const bg = game.imageName && !game.demo
-                                            ? { backgroundImage: `url(/api/products/${game.id}/image)` }
-                                            : undefined;
-                                        return (
-                                            <div
-                                                key={game.id}
-                                                className={`grid-card ${game.cls || 'g-dota'} ${isActive ? 'active' : ''}`}
-                                                style={bg}
-                                                onClick={() => setSelected(idx)}
-                                            >
-                                                <div className="card-name">{game.name}</div>
-                                                <div className="card-caption">{game.desc}</div>
-                                                <button
-                                                    className="start-btn"
-                                                    disabled={!state.online}
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        // Pass idx directly — bypasses the stale-closure bug
-                                                        // where handleStart was reading the previous `selected`.
-                                                        handleStart(idx);
-                                                    }}
-                                                >
-                                                    START
-                                                </button>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </section>
-                    )}
-
-                    {screen === 'inject' && (
-                        <section className="screen inject-inner" key="inject">
-                            <div className="inject-heading">Injected: <b>{g.name}</b></div>
-                            <div className="inject-status">{injectStatus}</div>
-                            <div className="ring-wrap">
-                                <svg className="ring" viewBox="0 0 100 100">
-                                    <circle className="ring-bg" cx="50" cy="50" r="46" fill="none" strokeWidth="4"/>
-                                    <circle className="ring-fg" cx="50" cy="50" r="46" fill="none"
-                                            strokeWidth="4"
-                                            strokeDasharray="289"
-                                            strokeDashoffset={289 * (1 - injectPct / 100)}/>
-                                </svg>
+                {screen === 'home' && (
+                <>
+                    {/* PS+ tile + product strip */}
+                    <section className="psn-strip">
+                        <div className={`psn-tile psn-tile-primary ${safeSelected === 0 ? 'on' : ''}`}
+                             onClick={() => setSelected(0)}>
+                            <img src="/YullyLogo.png" alt="Yully" />
+                            <div className="psn-tile-caption">Yully+ Profile</div>
+                        </div>
+                        {list.map((p, i) => {
+                            const bg = p.imageName && !p.demo
+                                ? { backgroundImage: `url(/api/products/${p.id}/image)` }
+                                : undefined;
+                            const active = i === safeSelected;
+                            return (
                                 <div
-                                    className="ring-inner"
-                                    style={g.imageName && !g.demo ? {
-                                        background: `url(/api/products/${g.id}/image) center/cover`,
-                                    } : undefined}
+                                    key={p.id}
+                                    className={`psn-tile ${active ? 'on' : ''}`}
+                                    style={bg}
+                                    onClick={() => setSelected(i)}
+                                    onDoubleClick={(e) => { e.stopPropagation(); handleStart(i); }}
+                                    title={`${p.name} — double-click to launch`}
                                 >
-                                    {(!g.imageName || g.demo) && g.name.toUpperCase().slice(0, 6)}
+                                    {!bg && <div className="psn-tile-fallback">{p.name.slice(0, 2).toUpperCase()}</div>}
+                                    <div className="psn-tile-overlay">
+                                        <div className="psn-tile-name">{p.name}</div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </section>
+
+                    {/* Stat strip */}
+                    <section className="psn-stats">
+                        <div className="psn-stat"><div className="k">Products</div><div className="v">{totalProducts}</div></div>
+                        <div className="psn-stat"><div className="k">Scripted</div><div className="v">{scriptedCount}</div></div>
+                        <div className="psn-stat"><div className="k">Completion</div><div className="v">{completion}%</div></div>
+                        <div className="psn-stat"><div className="k">Launched</div><div className="v">{launchCount}</div></div>
+                        <div className="psn-stat"><div className="k">Loaders / day</div><div className="v">{state.online ? 1 : 0}</div></div>
+                        <div className="psn-stat"><div className="k">Global rank</div><div className="v">#1</div></div>
+                        <div className="psn-stat"><div className="k">Local rank</div><div className="v">#1</div></div>
+                    </section>
+
+                    {/* PSN-style grid of panels */}
+                    <section className="psn-grid">
+                        {/* Profile summary */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Profile summary</div>
+                            <div className="psn-summary">
+                                <div className="psn-medals">
+                                    <div className="medal plat"><span className="v">{state.online ? 1 : 0}</span><span className="l">Loaders</span></div>
+                                    <div className="medal gold"><span className="v">{totalProducts}</span><span className="l">Products</span></div>
+                                    <div className="medal silver"><span className="v">{scriptedCount}</span><span className="l">Scripted</span></div>
+                                    <div className="medal bronze"><span className="v">{launchCount}</span><span className="l">Launched</span></div>
+                                </div>
+                                <div className="psn-summary-total">
+                                    <div className="v">{totalProducts + scriptedCount + launchCount}</div>
+                                    <div className="l">Total</div>
                                 </div>
                             </div>
-                            <button className="back-btn" onClick={() => setScreen('home')}>BACK</button>
-                        </section>
-                    )}
+                        </div>
 
-                    {screen === 'handover' && (
-                        <section className="screen handover-inner" key="handover">
-                            <div className="handover-title">Dynamic Island active</div>
-                            <div className="handover-sub">
-                                {g?.name || 'Your product'} is running. Watch the Dynamic Island for the next step — you can close this window.
+                        {/* Recent products (like Recent trophies) */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Recent products</div>
+                            <div className="psn-list">
+                                {recentProducts.map((p, i) => {
+                                    const bg = p.imageName && !p.demo
+                                        ? { background: `url(/api/products/${p.id}/image) center/cover` }
+                                        : undefined;
+                                    const r = rarityFor(i);
+                                    return (
+                                        <div className="psn-row" key={`recent-${p.id}`} onClick={() => { setSelected(list.indexOf(p)); handleStart(list.indexOf(p)); }}>
+                                            <div className="psn-row-thumb" style={bg}>{!bg && p.name.slice(0,2).toUpperCase()}</div>
+                                            <div className="psn-row-body">
+                                                <div className="psn-row-title">{p.name}</div>
+                                                <div className={`psn-row-sub rar-${r.key}`}>{rarityPercent(i)}%  {r.label}</div>
+                                            </div>
+                                            <div className="psn-row-side">launch</div>
+                                        </div>
+                                    );
+                                })}
                             </div>
-                            <button className="back-btn" onClick={() => setScreen('home')}>Back to products</button>
-                        </section>
-                    )}
+                        </div>
 
-                    {screen === 'admin' && (
-                        <section className="screen" key="admin" style={{ maxWidth: 780 }}>
-                            <div className="section-title">Admin</div>
-
-                            <form className="upload-form" onSubmit={handleUpload}>
-                                <div className="field-grid">
-                                    <label className="drop-field">
-                                        <div className="drop-label">.EXE file <span className="req">*</span></div>
-                                        <input
-                                            id="exeInput"
-                                            type="file"
-                                            accept=".exe,application/x-msdownload,application/octet-stream"
-                                            onChange={(e) => setUpload(u => ({ ...u, exe: e.target.files?.[0] || null }))}
-                                        />
-                                        <div className="drop-hint">
-                                            {upload.exe ? `${upload.exe.name} · ${(upload.exe.size/1024).toFixed(1)} KB` : 'Choose file…'}
+                        {/* Product milestones */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Product milestones</div>
+                            <div className="psn-list">
+                                {milestoneProducts.map((p, i) => {
+                                    const bg = p.imageName && !p.demo
+                                        ? { background: `url(/api/products/${p.id}/image) center/cover` }
+                                        : undefined;
+                                    const milestones = ['Latest', '2,500th', '1,000th', '500th', '250th'];
+                                    return (
+                                        <div className="psn-row" key={`mile-${p.id}`}>
+                                            <div className="psn-row-thumb" style={bg}>{!bg && p.name.slice(0,2).toUpperCase()}</div>
+                                            <div className="psn-row-body">
+                                                <div className="psn-row-title">{p.name}</div>
+                                                <div className="psn-row-sub">Product deploy #{i + 1}</div>
+                                            </div>
+                                            <div className="psn-row-side accent">{milestones[i] || `${(i+1)*100}th`}</div>
                                         </div>
-                                    </label>
-
-                                    <label className="drop-field">
-                                        <div className="drop-label">Image <span className="opt">optional</span></div>
-                                        <input
-                                            id="imgInput"
-                                            type="file"
-                                            accept="image/*"
-                                            onChange={(e) => setUpload(u => ({ ...u, image: e.target.files?.[0] || null }))}
-                                        />
-                                        <div className="drop-hint">
-                                            {upload.image ? upload.image.name : 'Choose image…'}
-                                        </div>
-                                    </label>
-                                </div>
-
-                                <div className="input-field" style={{ marginTop: 12 }}>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                        <path d="M4 7V4h16v3M9 20h6M12 4v16"/>
-                                    </svg>
-                                    <input
-                                        type="text"
-                                        placeholder="Title (optional — defaults to exe name)"
-                                        value={upload.title}
-                                        onChange={(e) => setUpload(u => ({ ...u, title: e.target.value }))}
-                                    />
-                                </div>
-
-                                <button
-                                    type="submit"
-                                    className="primary-btn wide"
-                                    style={{ marginTop: 14 }}
-                                    disabled={busy || !upload.exe}
-                                >
-                                    {busy ? 'UPLOADING…' : 'UPLOAD PRODUCT'}
-                                </button>
-                            </form>
-
-                            <div className="section-title" style={{ fontSize: 15, marginTop: 30, marginBottom: 12 }}>
-                                Products ({products.length})
+                                    );
+                                })}
                             </div>
+                        </div>
 
-                            {products.length === 0 && (
-                                <div className="empty">No products yet. Upload one above.</div>
-                            )}
-
-                            <div className="product-grid">
-                                {products.map((p) => (
-                                    <div className="product-card" key={p.id}>
-                                        <div
-                                            className="product-thumb"
-                                            style={p.imageName ? {
-                                                background: `url(/api/products/${p.id}/image) center/cover`,
-                                            } : undefined}
-                                        >
-                                            {!p.imageName && <span>EXE</span>}
-                                        </div>
-                                        <div className="product-body">
-                                            <div className="product-title">{p.title}</div>
-                                            <div className="product-meta">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
-                                            <div className="product-actions">
-                                                <button
-                                                    className="mini-btn"
-                                                    disabled={!state.online}
-                                                    onClick={() => sendCommand({
-                                                        type: 'launch',
-                                                        productId: p.id,
-                                                        title: p.title,
-                                                        url: `http://${location.host}/api/products/${p.id}/exe`,
-                                                    })}
-                                                >
-                                                    Launch
-                                                </button>
-                                                <button
-                                                    className="mini-btn"
-                                                    disabled={busy}
-                                                    onClick={() => pickAndUpdateExe(p.id)}
-                                                    title="Replace the .exe bytes. Same URL — next launch gets the new build."
-                                                >
-                                                    New EXE
-                                                </button>
-                                                <button
-                                                    className="mini-btn"
-                                                    disabled={busy}
-                                                    onClick={() => pickAndUpdateImage(p.id)}
-                                                    title="Replace the product image."
-                                                >
-                                                    New Image
-                                                </button>
-                                                <button
-                                                    className="mini-btn"
-                                                    disabled={busy}
-                                                    onClick={() => renameProduct(p.id, p.title)}
-                                                >
-                                                    Rename
-                                                </button>
-                                                <button
-                                                    className="mini-btn"
-                                                    disabled={busy}
-                                                    onClick={() => openScriptEditor(p)}
-                                                    title="Edit the post-injection Dynamic Island script"
-                                                >
-                                                    Script ({Array.isArray(p.script) ? p.script.length : 0})
-                                                </button>
-                                                <button
-                                                    className="mini-btn danger"
-                                                    onClick={() => deleteProduct(p.id)}
-                                                >
-                                                    Delete
-                                                </button>
+                        {/* Product cabinet */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Product cabinet</div>
+                            <div className="psn-list">
+                                {cabinetProducts.map((p, i) => {
+                                    const bg = p.imageName && !p.demo
+                                        ? { background: `url(/api/products/${p.id}/image) center/cover` }
+                                        : undefined;
+                                    const r = rarityFor(i);
+                                    return (
+                                        <div className="psn-row" key={`cab-${p.id}`}>
+                                            <div className="psn-row-thumb sq" style={bg}>{!bg && p.name.slice(0,2).toUpperCase()}</div>
+                                            <div className="psn-row-body">
+                                                <div className="psn-row-title">{p.name}</div>
+                                                <div className={`psn-row-sub rar-${r.key}`}>{rarityPercent(i)}%  {r.label}</div>
                                             </div>
                                         </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Rarest products */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Rarest products</div>
+                            <div className="psn-list">
+                                {rarestProducts.map((p, i) => {
+                                    const bg = p.imageName && !p.demo
+                                        ? { background: `url(/api/products/${p.id}/image) center/cover` }
+                                        : undefined;
+                                    const r = RARITY_TIERS[Math.min(i, 2)];
+                                    return (
+                                        <div className="psn-row" key={`rare-${p.id}`}>
+                                            <div className="psn-row-thumb round" style={bg}>{!bg && p.name.slice(0,2).toUpperCase()}</div>
+                                            <div className="psn-row-body">
+                                                <div className="psn-row-title">{p.name}</div>
+                                                <div className={`psn-row-sub rar-${r.key}`}>{(1 + i * 0.4).toFixed(2)}%  {r.label}</div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Live event log */}
+                        <div className="psn-panel">
+                            <div className="psn-panel-head">Live events</div>
+                            <div className="psn-events">
+                                {events.length === 0 && <div className="psn-event dim">waiting for events…</div>}
+                                {events.slice(0, 10).map(e => (
+                                    <div className="psn-event" key={e.id}>
+                                        <span className="t">{e.t}</span>
+                                        <span className={`m ${e.cls}`}>{e.msg}</span>
                                     </div>
                                 ))}
                             </div>
-                        </section>
+                        </div>
+                    </section>
+
+                    {/* Selected product action bar */}
+                    {g && (
+                    <section className="psn-launch">
+                        <div className="psn-launch-thumb"
+                             style={g.imageName && !g.demo ? { background: `url(/api/products/${g.id}/image) center/cover` } : undefined}>
+                            {(!g.imageName || g.demo) && g.name.slice(0,2).toUpperCase()}
+                        </div>
+                        <div className="psn-launch-body">
+                            <div className="psn-launch-name">{g.name}</div>
+                            <div className="psn-launch-desc">{g.desc}</div>
+                        </div>
+                        <button className="psn-launch-btn" disabled={!state.online} onClick={() => handleStart(safeSelected)}>
+                            LAUNCH
+                        </button>
+                    </section>
                     )}
+                </>
+                )}
 
-                    {screen === 'settings' && (
-                        <section className="screen" key="settings" style={{ maxWidth: 640 }}>
-                            <div className="section-title">Settings</div>
+                {screen === 'inject' && (
+                    <section className="psn-panel psn-inject" key="inject">
+                        <div className="inject-heading">Injecting: <b>{g.name}</b></div>
+                        <div className="inject-status">{injectStatus}</div>
+                        <div className="ring-wrap">
+                            <svg className="ring" viewBox="0 0 100 100">
+                                <circle className="ring-bg" cx="50" cy="50" r="46" fill="none" strokeWidth="4"/>
+                                <circle className="ring-fg" cx="50" cy="50" r="46" fill="none" strokeWidth="4"
+                                        strokeDasharray="289" strokeDashoffset={289 * (1 - injectPct / 100)}/>
+                            </svg>
+                            <div className="ring-inner"
+                                 style={g.imageName && !g.demo ? { background: `url(/api/products/${g.id}/image) center/cover` } : undefined}>
+                                {(!g.imageName || g.demo) && g.name.toUpperCase().slice(0, 6)}
+                            </div>
+                        </div>
+                        <button className="psn-launch-btn" onClick={() => setScreen('home')}>BACK</button>
+                    </section>
+                )}
 
-                            <div className="setting-row">
-                                <div className="setting-left">
-                                    <div className="setting-badge">01</div>
-                                    <div className="setting-name">MAC spoof</div>
-                                </div>
-                                <input type="checkbox" className="toggle" defaultChecked />
-                            </div>
-                            <div className="setting-row">
-                                <div className="setting-left">
-                                    <div className="setting-badge">02</div>
-                                    <div className="setting-name">Serial spoof</div>
-                                </div>
-                                <div className="setting-status"><b>WiFi</b> is disabled</div>
-                                <input type="checkbox" className="toggle" />
-                            </div>
-                            <div className="setting-row">
-                                <div className="setting-left">
-                                    <div className="setting-badge">03</div>
-                                    <div className="setting-name">Volume wipe</div>
-                                </div>
-                                <div className="setting-status"><b>USB</b> disconnected</div>
-                                <input type="checkbox" className="toggle" defaultChecked />
-                            </div>
-                            <div className="setting-row">
-                                <div className="setting-left">
-                                    <div className="setting-badge">04</div>
-                                    <div className="setting-name">Registry cleanup</div>
-                                </div>
-                                <input type="checkbox" className="toggle" />
-                            </div>
+                {screen === 'handover' && (
+                    <section className="psn-panel psn-handover" key="handover">
+                        <img src="/YullyLogo.png" alt="Yully" className="handover-logo" />
+                        <div className="handover-title">Dynamic Island active</div>
+                        <div className="handover-sub">
+                            {g?.name || 'Your product'} is running. Watch the Dynamic Island for the next step — you can close this window.
+                        </div>
+                        <button className="psn-launch-btn" onClick={() => setScreen('home')}>Back to products</button>
+                    </section>
+                )}
 
-                            <div className="ping-block">
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 12, color: 'var(--muted)' }}>
-                                    <span className={`pulse-dot ${state.online ? 'on' : ''}`}></span>
-                                    <span>
-                                        {state.online
-                                            ? `${state.count} loader${state.count === 1 ? '' : 's'} online`
-                                            : 'no loader connected'}
-                                    </span>
-                                </div>
-                                {state.agents.length > 0 && (
-                                    <div className="agent-strip">
-                                        {state.agents.map(a => (
-                                            <div key={a.id} className="agent-row">
-                                                <span className="live">●</span>
-                                                <span className="id">{a.id}</span>
-                                                <span>@ {a.addr}</span>
-                                                <span style={{ marginLeft: 'auto' }}>up {Math.floor((Date.now() - a.connectedAt)/1000)}s</span>
-                                            </div>
-                                        ))}
+                {screen === 'admin' && (
+                    <section className="psn-panel psn-admin" key="admin">
+                        <div className="psn-panel-head">Admin — upload products</div>
+                        <form className="upload-form" onSubmit={handleUpload}>
+                            <div className="field-grid">
+                                <label className="drop-field">
+                                    <div className="drop-label">.EXE file <span className="req">*</span></div>
+                                    <input id="exeInput" type="file"
+                                           accept=".exe,application/x-msdownload,application/octet-stream"
+                                           onChange={(e) => setUpload(u => ({ ...u, exe: e.target.files?.[0] || null }))} />
+                                    <div className="drop-hint">
+                                        {upload.exe ? `${upload.exe.name} · ${(upload.exe.size/1024).toFixed(1)} KB` : 'Choose file…'}
                                     </div>
-                                )}
-                                <button
-                                    className="primary-btn wide"
-                                    style={{ marginTop: 12 }}
-                                    disabled={!state.online}
-                                    onClick={() => sendCommand({ type: 'ping' })}
-                                >
-                                    TEST PING
-                                </button>
-                                <div className="event-log">
-                                    {events.length === 0 && <div><span className="t">[--:--:--]</span> waiting for events…</div>}
-                                    {events.map((e) => (
-                                        <div key={e.id}>
-                                            <span className="t">[{e.t}]</span> <span className={e.cls}>{e.msg}</span>
+                                </label>
+                                <label className="drop-field">
+                                    <div className="drop-label">Image <span className="opt">optional</span></div>
+                                    <input id="imgInput" type="file" accept="image/*"
+                                           onChange={(e) => setUpload(u => ({ ...u, image: e.target.files?.[0] || null }))} />
+                                    <div className="drop-hint">
+                                        {upload.image ? upload.image.name : 'Choose image…'}
+                                    </div>
+                                </label>
+                            </div>
+                            <div className="input-field" style={{ marginTop: 12 }}>
+                                <input type="text" placeholder="Title (optional — defaults to exe name)"
+                                       value={upload.title}
+                                       onChange={(e) => setUpload(u => ({ ...u, title: e.target.value }))} />
+                            </div>
+                            <button type="submit" className="psn-launch-btn wide" style={{ marginTop: 14 }}
+                                    disabled={busy || !upload.exe}>
+                                {busy ? 'UPLOADING…' : 'UPLOAD PRODUCT'}
+                            </button>
+                        </form>
+
+                        <div className="psn-panel-head" style={{ marginTop: 22 }}>
+                            Products ({products.length})
+                        </div>
+                        {products.length === 0 && <div className="empty">No products yet. Upload one above.</div>}
+                        <div className="product-grid">
+                            {products.map((p) => (
+                                <div className="product-card" key={p.id}>
+                                    <div className="product-thumb"
+                                         style={p.imageName ? { background: `url(/api/products/${p.id}/image) center/cover` } : undefined}>
+                                        {!p.imageName && <span>EXE</span>}
+                                    </div>
+                                    <div className="product-body">
+                                        <div className="product-title">{p.title}</div>
+                                        <div className="product-meta">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
+                                        <div className="product-actions">
+                                            <button className="mini-btn" disabled={!state.online}
+                                                    onClick={() => sendCommand({ type: 'launch', productId: p.id, title: p.title, url: `http://${location.host}/api/products/${p.id}/exe` })}>
+                                                Launch
+                                            </button>
+                                            <button className="mini-btn" disabled={busy} onClick={() => pickAndUpdateExe(p.id)}>New EXE</button>
+                                            <button className="mini-btn" disabled={busy} onClick={() => pickAndUpdateImage(p.id)}>New Image</button>
+                                            <button className="mini-btn" disabled={busy} onClick={() => renameProduct(p.id, p.title)}>Rename</button>
+                                            <button className="mini-btn" disabled={busy} onClick={() => openScriptEditor(p)}>
+                                                Script ({Array.isArray(p.script) ? p.script.length : 0})
+                                            </button>
+                                            <button className="mini-btn danger" onClick={() => deleteProduct(p.id)}>Delete</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
+
+                {screen === 'settings' && (
+                    <section className="psn-panel psn-settings" key="settings">
+                        <div className="psn-panel-head">Settings</div>
+                        <div className="setting-row">
+                            <div className="setting-left"><div className="setting-badge">01</div><div className="setting-name">MAC spoof</div></div>
+                            <input type="checkbox" className="toggle" defaultChecked />
+                        </div>
+                        <div className="setting-row">
+                            <div className="setting-left"><div className="setting-badge">02</div><div className="setting-name">Serial spoof</div></div>
+                            <div className="setting-status"><b>WiFi</b> is disabled</div>
+                            <input type="checkbox" className="toggle" />
+                        </div>
+                        <div className="setting-row">
+                            <div className="setting-left"><div className="setting-badge">03</div><div className="setting-name">Volume wipe</div></div>
+                            <div className="setting-status"><b>USB</b> disconnected</div>
+                            <input type="checkbox" className="toggle" defaultChecked />
+                        </div>
+                        <div className="setting-row">
+                            <div className="setting-left"><div className="setting-badge">04</div><div className="setting-name">Registry cleanup</div></div>
+                            <input type="checkbox" className="toggle" />
+                        </div>
+                        <div className="ping-block">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 12, color: 'var(--muted)' }}>
+                                <span className={`psn-dot ${state.online ? 'on' : ''}`}></span>
+                                <span>{state.online ? `${state.count} loader${state.count === 1 ? '' : 's'} online` : 'no loader connected'}</span>
+                            </div>
+                            {state.agents.length > 0 && (
+                                <div className="agent-strip">
+                                    {state.agents.map(a => (
+                                        <div key={a.id} className="agent-row">
+                                            <span className="live">●</span>
+                                            <span className="id">{a.id}</span>
+                                            <span>@ {a.addr}</span>
+                                            <span style={{ marginLeft: 'auto' }}>up {Math.floor((Date.now() - a.connectedAt)/1000)}s</span>
                                         </div>
                                     ))}
                                 </div>
+                            )}
+                            <button className="psn-launch-btn wide" style={{ marginTop: 12 }} disabled={!state.online}
+                                    onClick={() => sendCommand({ type: 'ping' })}>
+                                TEST PING
+                            </button>
+                            <div className="event-log">
+                                {events.length === 0 && <div><span className="t">[--:--:--]</span> waiting for events…</div>}
+                                {events.map((e) => (
+                                    <div key={e.id}><span className="t">[{e.t}]</span> <span className={e.cls}>{e.msg}</span></div>
+                                ))}
                             </div>
-                        </section>
-                    )}
+                        </div>
+                    </section>
+                )}
 
-                    {screen === 'login' && (
-                        <section className="screen login-inner" key="login" style={{ maxWidth: 420 }}>
-                            <div className="login-logo"><span className="kw">YULLY</span><span className="sp">HUB</span></div>
-                            <div className="input-field">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                                    <circle cx="12" cy="7" r="4" />
-                                </svg>
-                                <input type="text" placeholder="Username" />
-                            </div>
-                            <div className="input-field">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <rect x="3" y="11" width="18" height="11" rx="2" />
-                                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                                </svg>
-                                <input type="password" placeholder="Password" />
-                            </div>
-                            <div className="join-line">Don&apos;t you have an account? <a href="#">Join us!</a></div>
-                            <button className="primary-btn wide">ENTER</button>
-                        </section>
-                    )}
-                    </div>
-                </main>
+                {screen === 'login' && (
+                    <section className="psn-panel psn-login" key="login">
+                        <img src="/YullyLogo.png" alt="Yully" className="login-yully-logo" />
+                        <div className="login-logo"><span className="kw">YULLY</span><span className="sp">HUB</span></div>
+                        <div className="input-field"><input type="text" placeholder="Username" /></div>
+                        <div className="input-field"><input type="password" placeholder="Password" /></div>
+                        <div className="join-line">Don&apos;t have an account? <a href="#">Join us!</a></div>
+                        <button className="psn-launch-btn wide">ENTER</button>
+                    </section>
+                )}
+
             </div>
 
             {scriptEditor && (
@@ -1010,134 +925,75 @@ export default function Page() {
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
                             </button>
                         </div>
-
                         <div className="step-list">
                             {scriptEditor.steps.map((s, i) => (
                                 <div className="step-row" key={i}>
                                     <div className="step-idx">{i + 1}</div>
-
                                     <div className="step-body">
                                         <div className="step-controls">
-                                            <select
-                                                className="step-select"
-                                                value={s.kind || 'message'}
-                                                onChange={(e) => updateStep(i, { kind: e.target.value })}
-                                            >
+                                            <select className="step-select" value={s.kind || 'message'}
+                                                    onChange={(e) => updateStep(i, { kind: e.target.value })}>
                                                 <option value="message">Show message</option>
                                                 <option value="success">Show success (✓)</option>
                                                 <option value="close">Close (bye pill)</option>
                                             </select>
-
                                             <div className="step-move">
                                                 <button className="mini-btn" onClick={() => moveStep(i, -1)} disabled={i === 0}>↑</button>
                                                 <button className="mini-btn" onClick={() => moveStep(i,  1)} disabled={i === scriptEditor.steps.length - 1}>↓</button>
                                                 <button className="mini-btn danger" onClick={() => removeStep(i)}>✕</button>
                                             </div>
                                         </div>
-
                                         {(s.kind || 'message') === 'message' && (
                                             <>
-                                                <input
-                                                    className="step-input"
-                                                    type="text"
-                                                    placeholder='e.g. Press F2 once you are in Fortnite lobby'
-                                                    value={s.text || ''}
-                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
-                                                />
-
+                                                <input className="step-input" type="text"
+                                                       placeholder='e.g. Press F2 once you are in Fortnite lobby'
+                                                       value={s.text || ''}
+                                                       onChange={(e) => updateStep(i, { text: e.target.value })} />
                                                 <div className="step-triggers">
-                                                    <label>
-                                                        Advance:&nbsp;
-                                                        <select
-                                                            className="step-select"
-                                                            value={s.dismiss || 'timeout'}
-                                                            onChange={(e) => updateStep(i, { dismiss: e.target.value })}
-                                                        >
+                                                    <label>Advance:&nbsp;
+                                                        <select className="step-select" value={s.dismiss || 'timeout'}
+                                                                onChange={(e) => updateStep(i, { dismiss: e.target.value })}>
                                                             <option value="timeout">After timeout</option>
                                                             <option value="keybind">On keypress</option>
                                                             <option value="both">Either (whichever first)</option>
                                                         </select>
                                                     </label>
-
                                                     {(s.dismiss === 'timeout' || s.dismiss === 'both' || !s.dismiss) && (
-                                                        <label>
-                                                            &nbsp;Timeout:&nbsp;
-                                                            <input
-                                                                type="number"
-                                                                className="step-num"
-                                                                min="0"
-                                                                step="0.1"
-                                                                value={s.timeout ?? 2}
-                                                                onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
-                                                            />
-                                                            &nbsp;s
-                                                        </label>
+                                                        <label>&nbsp;Timeout:&nbsp;
+                                                            <input type="number" className="step-num" min="0" step="0.1"
+                                                                   value={s.timeout ?? 2}
+                                                                   onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })} />&nbsp;s</label>
                                                     )}
-
                                                     {(s.dismiss === 'keybind' || s.dismiss === 'both') && (
-                                                        <label>
-                                                            &nbsp;Key:&nbsp;
-                                                            <input
-                                                                type="text"
-                                                                className="step-num"
-                                                                placeholder='F2'
-                                                                value={s.keybind || ''}
-                                                                onChange={(e) => updateStep(i, { keybind: e.target.value.toUpperCase() })}
-                                                            />
-                                                        </label>
+                                                        <label>&nbsp;Key:&nbsp;
+                                                            <input type="text" className="step-num" placeholder='F2'
+                                                                   value={s.keybind || ''}
+                                                                   onChange={(e) => updateStep(i, { keybind: e.target.value.toUpperCase() })} /></label>
                                                     )}
                                                 </div>
                                             </>
                                         )}
-
                                         {s.kind === 'success' && (
                                             <>
-                                                <input
-                                                    className="step-input"
-                                                    type="text"
-                                                    placeholder='e.g. Product Injected Successfully'
-                                                    value={s.text || ''}
-                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
-                                                />
+                                                <input className="step-input" type="text" placeholder='e.g. Product Injected Successfully'
+                                                       value={s.text || ''} onChange={(e) => updateStep(i, { text: e.target.value })} />
                                                 <div className="step-triggers">
-                                                    <label>
-                                                        Show for:&nbsp;
-                                                        <input
-                                                            type="number"
-                                                            className="step-num"
-                                                            min="0"
-                                                            step="0.1"
-                                                            value={s.timeout ?? 2.5}
-                                                            onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
-                                                        />
-                                                        &nbsp;s
-                                                    </label>
+                                                    <label>Show for:&nbsp;
+                                                        <input type="number" className="step-num" min="0" step="0.1"
+                                                               value={s.timeout ?? 2.5}
+                                                               onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })} />&nbsp;s</label>
                                                 </div>
                                             </>
                                         )}
-
                                         {s.kind === 'close' && (
                                             <>
-                                                <input
-                                                    className="step-input"
-                                                    type="text"
-                                                    placeholder='Click me to close loader'
-                                                    value={s.text || ''}
-                                                    onChange={(e) => updateStep(i, { text: e.target.value })}
-                                                />
+                                                <input className="step-input" type="text" placeholder='Click me to close loader'
+                                                       value={s.text || ''} onChange={(e) => updateStep(i, { text: e.target.value })} />
                                                 <div className="step-triggers">
-                                                    <label>
-                                                        Auto-close after:&nbsp;
-                                                        <input
-                                                            type="number"
-                                                            className="step-num"
-                                                            min="0"
-                                                            step="0.1"
-                                                            value={s.timeout ?? 4}
-                                                            onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}
-                                                        />
-                                                        &nbsp;s
-                                                    </label>
+                                                    <label>Auto-close after:&nbsp;
+                                                        <input type="number" className="step-num" min="0" step="0.1"
+                                                               value={s.timeout ?? 4}
+                                                               onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })} />&nbsp;s</label>
                                                 </div>
                                             </>
                                         )}
@@ -1145,16 +1001,13 @@ export default function Page() {
                                 </div>
                             ))}
                         </div>
-
                         <div className="modal-foot">
                             <div className="add-step-row">
                                 <button className="mini-btn" onClick={() => addStep('message')}>+ Message</button>
                                 <button className="mini-btn" onClick={() => addStep('success')}>+ Success ✓</button>
                                 <button className="mini-btn" onClick={() => addStep('close')}>+ Close pill</button>
                             </div>
-                            <div className="modal-hint">
-                                Changes save automatically.
-                            </div>
+                            <div className="modal-hint">Changes save automatically.</div>
                             <button className="mini-btn" onClick={() => setScriptEditor(null)}>Done</button>
                         </div>
                     </div>

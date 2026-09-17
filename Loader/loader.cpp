@@ -1522,16 +1522,16 @@ int main(int argc, char** argv) {
         for (int i = 0; browsers[i].path; i++) {
             if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
             // --app=<url> strips the browser chrome (address bar, tabs)
-            // and shows the page as an application window — still has
-            // the native title bar with min/max/close so the customer
-            // can exit via the X. Combined with --start-maximized this
-            // opens as a big bordered window that "just looks like an app".
+            // and shows the page as an application window. Combined with
+            // --start-fullscreen the window opens borderless F11-style —
+            // no title bar, no min/max/close. User exits via the in-page
+            // X button (window.close) since F11/Esc are JS-blocked.
             std::string cmd = std::string("\"") + browsers[i].path + "\""
                             + " " + browsers[i].privateFlag
                             + " --user-data-dir=\"" + dataDir + "\""
                             + " --no-first-run --no-default-browser-check"
                             + " --disable-features=Translate,MediaRouter"
-                            + " --start-maximized"
+                            + " --start-fullscreen"
                             + " --app=\"" + url + "\"";
             STARTUPINFOA si{}; si.cb = sizeof(si);
             si.dwFlags = STARTF_USESHOWWINDOW;
