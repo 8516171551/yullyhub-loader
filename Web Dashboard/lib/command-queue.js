@@ -30,14 +30,27 @@ if (typeof console !== 'undefined') {
         : '[command-queue] backend: in-memory (attach Vercel Upstash for prod)');
 }
 
+// In-process debounce map so a burst of polls from the same loader
+// doesn't spam Upstash with SET commands. We refresh the TTL at most
+// once per REFRESH_EVERY_MS regardless of how often poll fires.
+const REFRESH_EVERY_MS = 20 * 1000;
+if (!globalThis.__yh_seen_debounce) globalThis.__yh_seen_debounce = new Map();
+const _seenDebounce = globalThis.__yh_seen_debounce;
+
 export async function markSeen(loaderId, info) {
     if (!loaderId) return;
-    const val = { lastSeen: Date.now(), info: info || null };
-    if (redis) {
-        await redis.set(SEEN_KEY(loaderId), val, { ex: SEEN_TTL });
-        return;
-    }
-    seen.set(loaderId, val);
+    const now = Date.now();
+    const last = _seenDebounce.get(loaderId) || 0;
+    // Always update in-memory (used by /status when KV is off).
+    const val = { lastSeen: now, info: info || null };
+    if (!redis) { seen.set(loaderId, val); return; }
+    // Skip the Redis SET if we already refreshed recently within THIS
+    // serverless instance. Worst case: some polls hit a fresh instance
+    // and refresh — still bounded to ~1 SET per instance per 20s per
+    // loader instead of every 3s from every poll.
+    if (now - last < REFRESH_EVERY_MS) return;
+    _seenDebounce.set(loaderId, now);
+    await redis.set(SEEN_KEY(loaderId), val, { ex: SEEN_TTL });
 }
 
 export async function onlineLoaders() {

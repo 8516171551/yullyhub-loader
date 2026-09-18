@@ -9,7 +9,11 @@ namespace cfg {
     constexpr int         DEFAULT_API_PORT  = 443;
 
     // ---- Timers ----
-    constexpr int  POLL_INTERVAL_MS      = 500;   // /api/loader/poll cadence
+    // Poll cadence: Upstash Redis free tier is ~10k commands/day and
+    // each poll does 1-3 commands, so 500ms would burn the quota in
+    // under an hour. 3s gives a comfortable margin while still feeling
+    // responsive when a command arrives.
+    constexpr int  POLL_INTERVAL_MS      = 3000;
     constexpr int  HEARTBEAT_INTERVAL_S  = 30;    // /api/auth/heartbeat cadence
     constexpr int  HEARTBEAT_FAIL_CEIL   = 6;     // consecutive net-fail → fail-secure
     constexpr int  PROTECT_INTERVAL_S    = 4;     // anti-debug polling cadence
