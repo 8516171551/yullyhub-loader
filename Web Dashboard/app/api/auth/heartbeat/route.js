@@ -2,59 +2,79 @@
 //
 // The C++ loader calls this every 30s while a product is running. If we
 // respond { valid: false, reason } the loader hard-kills the product AND
-// itself. Ideal place to enforce subscription expiry, per-product
-// entitlements, kill-switches for banned accounts, etc.
+// itself.
 //
-// Request body: { token, loaderId, productId }
-// Response:     { valid: boolean, reason?: string, ttl_seconds: number }
+// Request:  { token, loaderId, productId }
+// Response: { valid: boolean, reason?: string, ttl_seconds: number }
 //
-// MVP behaviour: we look the exchange token up in the shared token store.
-// If found + subscription.active + not past subscription.expires_at →
-// valid. If subscription is explicitly inactive or expired → invalid.
-// Missing token → fail-open (valid) so a serverless cold-instance whose
-// in-memory token map is empty doesn't wrongly kill an active session.
-// Swap in a durable subscription DB once real billing is wired.
+// Validates BOTH the yh_loader_sessions row (not revoked) AND the parent
+// licenses row (still active, not blacklisted, not expired). If either
+// says no, the loader dies.
+//
+// Fail-open ONLY on transient DB errors (network blip) — never on
+// "session not found", because that would let revoked tokens keep
+// running products.
 
 import { NextResponse } from 'next/server';
-import { tokens } from '../../../../lib/token-store.js';
+import { q, q1, hasDb } from '../../../../lib/db.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+
+const OK  = (extra = {}) => NextResponse.json(
+    { valid: true, ttl_seconds: 30, ...extra },
+    { headers: { 'Cache-Control': 'no-store' } }
+);
+const NO  = (reason) => NextResponse.json(
+    { valid: false, reason },
+    { headers: { 'Cache-Control': 'no-store' } }
+);
 
 export async function POST(request) {
     let body = {};
     try { body = await request.json(); } catch {}
     const { token = '', loaderId = '', productId = '' } = body || {};
 
-    const rec = token ? tokens.get(token) : null;
-    if (!rec) {
-        // Fail-open — see note above. Do NOT tell the loader to die just
-        // because we lost sight of the token.
-        return NextResponse.json({
-            valid: true, ttl_seconds: 30,
-            note: 'token-not-found (fail-open)',
-        }, { headers: { 'Cache-Control': 'no-store' } });
+    if (!hasDb()) {
+        // Without a DB we have no source of truth — fail-open so we don't
+        // wrongly kill users. Prod deploys should always have DATABASE_URL.
+        return OK({ note: 'db-not-configured (fail-open)' });
+    }
+    if (!token) return NO('missing_token');
+
+    let row;
+    try {
+        row = await q1(
+            `SELECT s.license_key, s.revoked_at,
+                    l.active     AS lic_active,
+                    l.blacklisted_at,
+                    l.expires_at
+             FROM yh_loader_sessions s
+             LEFT JOIN licenses l ON l.\`key\` = s.license_key
+             WHERE s.session_token = ?`,
+            [token]
+        );
+    } catch (e) {
+        // Transient — fail-open. Loader will re-check in 30s.
+        return OK({ note: 'db-error (fail-open)', error: String(e.message || e) });
     }
 
-    const sub = rec.subscription || {};
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (sub.active === false) {
-        return NextResponse.json({ valid: false, reason: 'subscription_inactive' },
-            { headers: { 'Cache-Control': 'no-store' } });
-    }
-    if (sub.expires_at && sub.expires_at < nowSec) {
-        return NextResponse.json({ valid: false, reason: 'subscription_expired' },
-            { headers: { 'Cache-Control': 'no-store' } });
-    }
-    if (rec.productId && productId && rec.productId !== productId) {
-        return NextResponse.json({ valid: false, reason: 'product_mismatch' },
-            { headers: { 'Cache-Control': 'no-store' } });
-    }
-    return NextResponse.json({
-        valid:       true,
-        ttl_seconds: 30,
-        user_id:     rec.userId,
-        product_id:  rec.productId,
-        plan:        sub.plan || null,
-    }, { headers: { 'Cache-Control': 'no-store' } });
+    if (!row)                                                    return NO('session_not_found');
+    if (row.revoked_at)                                          return NO('session_revoked');
+    if (!row.lic_active)                                         return NO('key_inactive');
+    if (row.blacklisted_at)                                      return NO('key_blacklisted');
+    if (row.expires_at && new Date(row.expires_at) < new Date()) return NO('key_expired');
+
+    // Touch last_seen_at + record active product (best-effort).
+    try {
+        await q(
+            `UPDATE yh_loader_sessions
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    active_product = COALESCE(?, active_product)
+              WHERE session_token = ?`,
+            [productId || null, token]
+        );
+    } catch {}
+
+    return OK({ license_key: row.license_key });
 }

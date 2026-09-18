@@ -1,53 +1,104 @@
-// GET  /api/auth/handshake?token=<token>
-// POST /api/auth/handshake       (JSON body: { token })
+// POST /api/auth/handshake
 //
-// The PRODUCT calls this after the loader launches it. Response tells the
-// product whether to keep running or bail out.
+// The landing page POSTs the license key the user typed in. We validate
+// against the shared `licenses` table (yully.wtf owns it, yullyhub reads
+// & minimally writes on-first-activation). On success we mint a session
+// row in yh_loader_sessions and return a token the loader will pass to
+// /api/auth/heartbeat on every 30s beat.
 //
-// Success (200):
-//   {
-//     valid: true,
-//     user:         { id, plan },
-//     subscription: { plan, active, expires_at },
-//     product_id:   string | null,
-//     issued_at:    unix-seconds,
-//     expires_at:   unix-seconds,      // token TTL
-//   }
-//
-// Failure (401 / 400):
-//   { valid: false, error: "missing" | "unknown" | "expired" }
+// Request:  { key: "XXXX-XXXX-XXXX-XXXX", hwid?: "...", loaderId?: "..." }
+// Response: { ok: true, token, loaderId, tier, expires_at }
+//        or { ok: false, reason }
 
 import { NextResponse } from 'next/server';
-import { redeemToken, sweep } from '../../../../lib/token-store.js';
+import crypto from 'crypto';
+import { q, q1, hasDb } from '../../../../lib/db.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function respond(token) {
-    sweep();
-    const res = redeemToken(token, { markUsed: true });
-    if (!res.ok) {
-        const status = res.reason === 'missing' ? 400 : 401;
-        return NextResponse.json({ valid: false, error: res.reason }, { status });
-    }
-    const rec = res.record;
-    return NextResponse.json({
-        valid: true,
-        user:  { id: rec.userId, plan: rec.subscription?.plan || 'unknown' },
-        subscription: rec.subscription,
-        product_id:   rec.productId,
-        issued_at:    Math.floor(rec.createdAt / 1000),
-        expires_at:   Math.floor(rec.expiresAt / 1000),
+const KEY_RE = /^[0-9A-F]{4}(?:-[0-9A-F]{4}){3}$/i;
+
+function fail(reason, code = 400) {
+    return NextResponse.json({ ok: false, reason }, {
+        status: code,
+        headers: { 'Cache-Control': 'no-store' },
     });
 }
 
-export async function GET(request) {
-    const url = new URL(request.url);
-    return respond(url.searchParams.get('token'));
+function clientIp(req) {
+    const xff = req.headers.get('x-forwarded-for') || '';
+    return xff.split(',')[0].trim() || req.headers.get('x-real-ip') || '';
 }
 
 export async function POST(request) {
+    if (!hasDb()) return fail('db_not_configured', 503);
+
     let body = {};
     try { body = await request.json(); } catch {}
-    return respond(body.token);
+    const key      = String(body.key || '').trim().toUpperCase();
+    const hwid     = String(body.hwid || '').slice(0, 255) || null;
+    const loaderId = String(body.loaderId || '').slice(0, 80) ||
+                     crypto.randomBytes(8).toString('hex');
+
+    if (!KEY_RE.test(key)) return fail('invalid_key_format');
+
+    const lic = await q1(
+        `SELECT \`key\`, active, blacklisted_at, expires_at, activated_at,
+                duration_days, tier, hwid, ip_lock, max_devices
+         FROM licenses WHERE \`key\` = ?`,
+        [key]
+    );
+    if (!lic) return fail('key_not_found', 404);
+
+    const now    = new Date();
+    const nowSec = Math.floor(now.getTime() / 1000);
+
+    if (!lic.active)                                          return fail('key_inactive', 403);
+    if (lic.blacklisted_at)                                   return fail('key_blacklisted', 403);
+    if (lic.expires_at && new Date(lic.expires_at) < now)     return fail('key_expired', 403);
+    if (lic.hwid && hwid && lic.hwid !== hwid)                return fail('hwid_locked', 403);
+
+    // First-use activation: stamp activated_at + expires_at + hwid on the
+    // license row. This is the ONLY column yullyhub writes on licenses.
+    if (!lic.activated_at) {
+        const expiresAt = lic.duration_days
+            ? new Date(now.getTime() + lic.duration_days * 86400 * 1000)
+            : null;
+        await q(
+            `UPDATE licenses
+                SET activated_at = ?, expires_at = COALESCE(expires_at, ?), hwid = COALESCE(hwid, ?)
+              WHERE \`key\` = ? AND activated_at IS NULL`,
+            [now, expiresAt, hwid, key]
+        );
+        lic.activated_at = now;
+        if (!lic.expires_at) lic.expires_at = expiresAt;
+    }
+
+    // Mint session token.
+    const sessionId    = crypto.randomUUID();
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const ip           = clientIp(request);
+    const ua           = String(request.headers.get('user-agent') || '').slice(0, 500);
+
+    // Revoke prior live sessions for this key — one active session per key.
+    await q(
+        `UPDATE yh_loader_sessions SET revoked_at = ?
+           WHERE license_key = ? AND revoked_at IS NULL`,
+        [now, key]
+    );
+    await q(
+        `INSERT INTO yh_loader_sessions
+            (id, license_key, loader_id, session_token, ip, user_agent)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [sessionId, key, loaderId, sessionToken, ip, ua]
+    );
+
+    return NextResponse.json({
+        ok:         true,
+        token:      sessionToken,
+        loaderId,
+        tier:       lic.tier,
+        expires_at: lic.expires_at ? Math.floor(new Date(lic.expires_at).getTime() / 1000) : null,
+    }, { headers: { 'Cache-Control': 'no-store' } });
 }

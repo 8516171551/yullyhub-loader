@@ -1,19 +1,23 @@
 // product-store.js — persistence for products.
 //
-// Meta lives in Upstash Redis:
-//   yh:products         (SET of product ids)
-//   yh:product:<id>     (JSON of the product's meta)
+// Primary backend: shared MySQL (`yh_products`) on the yully.wtf/yullyhub
+// VPS. Requires DATABASE_URL. See lib/db.js and _yullyhub_readme row in
+// the DB for the ownership boundary — yh_products is OURS, do not
+// touch tables owned by yully.wtf.
 //
-// Binary blobs (exe, image) live in Vercel Blob at:
+// Fallback: Upstash Redis, when DATABASE_URL isn't set (local dev). Same
+// API surface, so callers don't need to know which backend is live.
+//
+// Binary blobs (exe, image) always live in Vercel Blob at:
 //   products/<id>/app.exe
 //   products/<id>/image<.ext>
-//
-// Everything a Vercel serverless function needs — no local filesystem
-// writes (fs is read-only on the platform, which was breaking uploads).
+// Blob is private; /api/products/<id>/{exe,image} presigns a fresh GET
+// URL on each request.
 
 import { Redis } from '@upstash/redis';
 import { put as blobPut, del as blobDel } from '@vercel/blob';
 import crypto from 'crypto';
+import { getPool, hasDb, q, q1 } from './db.js';
 
 const KV_URL   = process.env.KV_REST_API_URL   || process.env.UPSTASH_REDIS_REST_URL;
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -22,6 +26,8 @@ const redis    = (KV_URL && KV_TOKEN) ? new Redis({ url: KV_URL, token: KV_TOKEN
 const IDS_KEY   = 'yh:products';
 const META_KEY  = (id) => `yh:product:${id}`;
 const BLOB_ROOT = (id) => `products/${id}`;
+
+const USE_DB = hasDb();
 
 export function newId() {
     return crypto.randomBytes(6).toString('hex');
@@ -58,9 +64,26 @@ async function uploadImage(id, file) {
     return { url: res.url, name: `image${ext}`, mime: file.type || 'image/png' };
 }
 
-// ---- Meta helpers ----
+// ---- Meta helpers (backend-aware) ----
+
+function rowToMeta(row) {
+    if (!row) return null;
+    const meta = row.meta && typeof row.meta === 'object' ? row.meta
+               : row.meta ? (() => { try { return JSON.parse(row.meta); } catch { return {}; } })()
+               : {};
+    // Ensure id + timestamps are always present even for older rows.
+    meta.id = row.id;
+    if (!meta.createdAt && row.created_at) meta.createdAt = new Date(row.created_at).getTime();
+    if (!meta.updatedAt && row.updated_at) meta.updatedAt = new Date(row.updated_at).getTime();
+    if (typeof meta.hideWindow !== 'boolean') meta.hideWindow = !!row.hide_window;
+    return meta;
+}
 
 export async function listProducts() {
+    if (USE_DB) {
+        const rows = await q("SELECT id, meta, hide_window, created_at, updated_at FROM yh_products ORDER BY created_at DESC");
+        return rows.map(rowToMeta).filter(Boolean);
+    }
     if (!redis) return [];
     const ids = await redis.smembers(IDS_KEY);
     if (!ids || ids.length === 0) return [];
@@ -76,6 +99,10 @@ export async function listProducts() {
 }
 
 export async function getProduct(id) {
+    if (USE_DB) {
+        const row = await q1("SELECT id, meta, hide_window, created_at, updated_at FROM yh_products WHERE id = ?", [id]);
+        return rowToMeta(row);
+    }
     if (!redis) return null;
     const v = await redis.get(META_KEY(id));
     if (!v) return null;
@@ -83,6 +110,32 @@ export async function getProduct(id) {
 }
 
 export async function saveProduct(meta) {
+    if (USE_DB) {
+        // meta.id must be set. name/slug/exe_url mirror common fields for
+        // ad-hoc reporting; the source of truth is meta JSON.
+        const payload = { ...meta };
+        // Strip transient fields from JSON if any — keep it clean.
+        const jsonStr = JSON.stringify(payload);
+        await q(
+            `INSERT INTO yh_products (id, name, slug, exe_url, exe_pathname, image_urls, hide_window, meta)
+             VALUES (?, ?, NULL, ?, ?, NULL, ?, CAST(? AS JSON))
+             ON DUPLICATE KEY UPDATE
+                name         = VALUES(name),
+                exe_url      = VALUES(exe_url),
+                exe_pathname = VALUES(exe_pathname),
+                hide_window  = VALUES(hide_window),
+                meta         = VALUES(meta)`,
+            [
+                meta.id,
+                meta.title || null,
+                meta.exeUrl || null,
+                meta.exePathname || null,
+                meta.hideWindow ? 1 : 0,
+                jsonStr,
+            ]
+        );
+        return meta;
+    }
     if (!redis) throw new Error('product store not configured');
     await redis.set(META_KEY(meta.id), JSON.stringify(meta));
     await redis.sadd(IDS_KEY, meta.id);
@@ -90,13 +143,16 @@ export async function saveProduct(meta) {
 }
 
 export async function deleteProduct(id) {
-    if (!redis) return;
     const meta = await getProduct(id);
-    // Kill blobs (both if present).
     const kills = [];
     if (meta?.exeUrl)   kills.push(blobDel(meta.exeUrl).catch(() => {}));
     if (meta?.imageUrl) kills.push(blobDel(meta.imageUrl).catch(() => {}));
     await Promise.all(kills);
+    if (USE_DB) {
+        await q("DELETE FROM yh_products WHERE id = ?", [id]);
+        return;
+    }
+    if (!redis) return;
     await redis.del(META_KEY(id));
     await redis.srem(IDS_KEY, id);
 }
@@ -127,11 +183,6 @@ export async function createProduct({ exe, image, title }) {
     return saveProduct(meta);
 }
 
-// Called after the browser uploaded exe (+ optional image) to Vercel
-// Blob via uploadPresigned(). Client passes { pathname, url, name,
-// size } for each; we persist both. `pathname` is the durable handle
-// used by exe/image redirect routes to mint fresh signed URLs on each
-// GET (store is private).
 export async function createProductFromUrls({
     title, exeName, exeSize, exeUrl, exePathname,
     imageName, imageMime, imageUrl, imagePathname,
@@ -156,7 +207,6 @@ export async function createProductFromUrls({
     return saveProduct(meta);
 }
 
-// Replace exe/image with newly-uploaded pathnames/urls.
 export async function updateProductFromUrls(id, {
     exeName, exeSize, exeUrl, exePathname,
     imageName, imageMime, imageUrl, imagePathname,
@@ -190,7 +240,6 @@ export async function updateProduct(id, { exe, image, title, script, hideWindow 
     if (!meta) throw new Error('not found');
 
     if (exe && typeof exe !== 'string' && exe.size > 0) {
-        // Replace existing blob (deleteProduct's URL then re-put).
         if (meta.exeUrl) await blobDel(meta.exeUrl).catch(() => {});
         const e = await uploadExe(id, exe);
         meta.exeName = e.name;
