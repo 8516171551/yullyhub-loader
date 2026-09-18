@@ -18,11 +18,14 @@ function LandingPage({ session, checking }) {
         try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
     };
 
-    // Auto-detect a newly-online loader when the visitor is sitting on the
-    // landing page without a session URL. As soon as one shows up we
-    // redirect to /?session=<id> which the outer component then handles.
+    // Continuously watch /api/loader/latest for the freshest online
+    // loader — whether or not we already have a session in the URL.
+    // Reason: a stale session id in the URL (previous run's loader
+    // died, user reran `irm | iex` in a new PS) would otherwise leave
+    // the visitor stuck on "Connecting…" forever. If /latest returns
+    // a DIFFERENT online loader from the one in our URL, we transition
+    // to it. Also handles the fresh-visit case (no session param yet).
     useEffect(() => {
-        if (session) return;
         if (typeof window === 'undefined') return;
         let alive = true;
         const poll = async () => {
@@ -31,7 +34,9 @@ function LandingPage({ session, checking }) {
                 if (!alive) return;
                 if (r.ok) {
                     const j = await r.json();
-                    if (j.id) {
+                    // Only jump when there's a NEWER online loader than
+                    // whatever session is already in the URL.
+                    if (j.id && j.id !== session) {
                         const u = new URL(window.location.href);
                         u.searchParams.set('session', j.id);
                         window.location.replace(u.toString());
@@ -40,7 +45,7 @@ function LandingPage({ session, checking }) {
             } catch {}
         };
         poll();
-        const iv = setInterval(poll, 700);
+        const iv = setInterval(poll, 1200);
         return () => { alive = false; clearInterval(iv); };
     }, [session]);
 
