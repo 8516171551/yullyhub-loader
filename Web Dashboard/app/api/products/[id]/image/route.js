@@ -20,7 +20,7 @@ export async function GET(_request, { params }) {
         const { presignedUrl } = await presignUrl(token, {
             operation: 'get',
             pathname:  meta.imagePathname,
-            access:    'private',
+            access:    'public',
         });
         return NextResponse.redirect(presignedUrl, 302);
     } catch (e) {

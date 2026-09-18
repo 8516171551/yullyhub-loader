@@ -18,10 +18,13 @@ export async function GET(_request, { params }) {
             operations: ['get'],
             validUntil,
         });
+        // Files were uploaded with access:'public' via the client
+        // presigned flow → CDN URL is served from the public path
+        // even though the STORE default is private.
         const { presignedUrl } = await presignUrl(token, {
             operation: 'get',
             pathname:  meta.exePathname,
-            access:    'private',
+            access:    'public',
         });
         return NextResponse.redirect(presignedUrl, 302);
     } catch (e) {
