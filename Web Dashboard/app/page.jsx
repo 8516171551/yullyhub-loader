@@ -3,6 +3,71 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { uploadPresigned as blobUpload } from '@vercel/blob/client';
 
+// ---------- Login page ----------
+// Yully credentials (admin or reseller username + password) OR a license
+// key (XXXX-XXXX-XXXX-XXXX). One flow, one form.
+function LoginPage({ onLoggedIn }) {
+    const [id, setId] = useState('');
+    const [pw, setPw] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+
+    const isKey = /^[0-9A-F]{4}(?:-[0-9A-F]{4}){3}$/i.test(id.trim());
+
+    const submit = async (e) => {
+        e.preventDefault();
+        if (!id.trim()) return;
+        setBusy(true); setErr('');
+        try {
+            const r = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifier: id.trim(), password: pw }),
+            });
+            const j = await r.json();
+            if (r.ok && j.ok) onLoggedIn(j.identity);
+            else setErr(j.reason || 'invalid_credentials');
+        } catch (e2) {
+            setErr('network');
+        }
+        setBusy(false);
+    };
+
+    return (
+        <div className="landing">
+            <div className="landing-inner" style={{ maxWidth: 380 }}>
+                <img className="landing-logo" src="/YullyLogo.png" alt="YullyHub" />
+                <div className="landing-brand">YullyHub</div>
+                <div className="landing-sub">Sign in with your Yully account or a license key.</div>
+                <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%', marginTop: 18 }}>
+                    <input
+                        autoFocus
+                        placeholder="Username or license key"
+                        value={id}
+                        onChange={e => setId(e.target.value)}
+                        className="landing-input"
+                        autoComplete="username"
+                    />
+                    {!isKey && (
+                        <input
+                            type="password"
+                            placeholder="Password"
+                            value={pw}
+                            onChange={e => setPw(e.target.value)}
+                            className="landing-input"
+                            autoComplete="current-password"
+                        />
+                    )}
+                    <button className="landing-copy" type="submit" disabled={busy || !id.trim() || (!isKey && !pw)}>
+                        {busy ? 'Signing in…' : (isKey ? 'Redeem key' : 'Sign in')}
+                    </button>
+                    {err && <div style={{ color: '#ff6b6b', fontSize: 13, textAlign: 'center' }}>{err.replace(/_/g,' ')}</div>}
+                </form>
+            </div>
+        </div>
+    );
+}
+
 // ---------- Landing page (session gate) ----------
 // Three states:
 //   1. No session in URL, no online loader yet
@@ -98,6 +163,29 @@ function Clock() {
 }
 
 export default function Page() {
+    // ---- Auth gate (Yully credentials OR license key) ----
+    const [identity, setIdentity] = useState(null);      // { identity_type, identity_ref, license_key } | null
+    const [authLoading, setAuthLoading] = useState(true);
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const r = await fetch('/api/auth/me', { cache: 'no-store' });
+                if (!alive) return;
+                if (r.ok) {
+                    const j = await r.json();
+                    if (j.ok) setIdentity({
+                        identity_type: j.identity_type,
+                        identity_ref:  j.identity_ref,
+                        license_key:   j.license_key,
+                    });
+                }
+            } catch {}
+            if (alive) setAuthLoading(false);
+        })();
+        return () => { alive = false; };
+    }, []);
+
     // ---- Session gate ----
     const [session, setSession] = useState(null);
     const [loaderConnected, setLoaderConnected] = useState(false);
@@ -488,7 +576,15 @@ export default function Page() {
         return () => clearTimeout(t);
     }, [scriptEditor?.steps, scriptEditor?.id, loadProducts]);
 
-    // Gate — no valid session + connected loader → landing page only.
+    // Gate 1 — auth. No cookie → login page.
+    if (authLoading) {
+        return <div className="landing"><div className="landing-inner"><span className="spinner big"/></div></div>;
+    }
+    if (!identity) {
+        return <LoginPage onLoggedIn={(id) => { setIdentity(id); }} />;
+    }
+
+    // Gate 2 — loader session (existing landing page flow).
     if (!session || !loaderConnected) {
         return <LandingPage session={session} checking={checkingLoader} />;
     }

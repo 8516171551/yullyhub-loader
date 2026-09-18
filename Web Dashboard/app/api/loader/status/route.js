@@ -1,52 +1,35 @@
 // GET /api/loader/status?id=<loaderId>
 //
-// Read-only check — does NOT bump the `seen` timestamp, so a browser
-// asking "is my loader online?" every 2s doesn't stop the loader from
-// being considered offline.
+// Read-only check backed by yh_loader_sessions.last_seen_at — does NOT
+// bump the timestamp so a chatty dashboard doesn't keep a dead loader
+// looking alive.
 
 import { NextResponse } from 'next/server';
-import { seen } from '../../../../lib/command-queue.js';
+import { q1, hasDb } from '../../../../lib/db.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Match command-queue.js — 15s so the dashboard boots back to the
-// landing page quickly when the loader disappears.
 const ONLINE_TTL_MS = 15 * 1000;
-
-const KV_URL   = process.env.KV_REST_API_URL   || process.env.UPSTASH_REDIS_REST_URL;
-const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-const HAS_KV   = !!(KV_URL && KV_TOKEN);
-
-async function kv(cmd) {
-    if (!HAS_KV) return null;
-    try {
-        const r = await fetch(KV_URL, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(cmd),
-        });
-        if (!r.ok) return null;
-        const j = await r.json();
-        return j.result;
-    } catch { return null; }
-}
 
 export async function GET(request) {
     const url = new URL(request.url);
     const id  = url.searchParams.get('id');
     if (!id) return NextResponse.json({ online: false, error: 'no id' }, { status: 400 });
 
-    let rec = null;
-    if (HAS_KV) {
-        const raw = await kv(['GET', `yh:seen:${id}`]);
-        if (raw) { try { rec = JSON.parse(raw); } catch {} }
-    } else {
-        rec = seen.get(id) || null;
+    if (!hasDb()) {
+        return NextResponse.json({ online: false, note: 'db-not-configured' },
+            { headers: { 'Cache-Control': 'no-store' } });
     }
-    const online = !!rec && (Date.now() - rec.lastSeen) <= ONLINE_TTL_MS;
-    return NextResponse.json({
-        online,
-        lastSeen: rec ? rec.lastSeen : null,
-    }, { headers: { 'Cache-Control': 'no-store' } });
+
+    const row = await q1(
+        `SELECT UNIX_TIMESTAMP(MAX(last_seen_at)) AS last_seen
+           FROM yh_loader_sessions
+          WHERE loader_id = ? AND revoked_at IS NULL`,
+        [id]
+    );
+    const lastSeen = row?.last_seen ? Number(row.last_seen) * 1000 : null;
+    const online = !!lastSeen && (Date.now() - lastSeen) <= ONLINE_TTL_MS;
+    return NextResponse.json({ online, lastSeen },
+        { headers: { 'Cache-Control': 'no-store' } });
 }

@@ -1,12 +1,37 @@
 import { NextResponse } from 'next/server';
 import { issueSignedToken, presignUrl } from '@vercel/blob';
 import { getProduct, safeId } from '../../../../../lib/product-store.js';
+import { currentSession } from '../../../../../lib/auth.js';
+import { q1, hasDb } from '../../../../../lib/db.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Gate: either a valid browser session cookie OR a valid loader-session
+// Bearer token in Authorization. Anonymous callers get 401.
+async function gate(request) {
+    // Loader flow: Authorization: Bearer <yh_loader_sessions.session_token>
+    const auth = request.headers.get('authorization') || '';
+    const m = auth.match(/^Bearer\s+([a-f0-9]{16,96})$/i);
+    if (m && hasDb()) {
+        const row = await q1(
+            `SELECT s.session_token, s.revoked_at, l.active, l.blacklisted_at, l.expires_at
+               FROM yh_loader_sessions s
+          LEFT JOIN licenses l ON l.\`key\` = s.license_key
+              WHERE s.session_token = ?`,
+            [m[1]]
+        );
+        if (row && !row.revoked_at && row.active && !row.blacklisted_at
+            && !(row.expires_at && new Date(row.expires_at) < new Date())) return true;
+    }
+    // Browser flow: yh_session cookie
+    const sess = await currentSession();
+    return !!sess;
+}
+
 // Store is private → each read gets a fresh 5-minute presigned GET URL.
-export async function GET(_request, { params }) {
+export async function GET(request, { params }) {
+    if (!(await gate(request))) return new Response('unauthorized', { status: 401 });
     const id = safeId(params.id);
     if (!id) return new Response('bad id', { status: 400 });
     const meta = await getProduct(id);
