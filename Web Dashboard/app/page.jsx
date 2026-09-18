@@ -366,6 +366,47 @@ export default function Page() {
     const deleteProduct = async (id) => { if (!confirm('Delete this product?')) return; await fetch(`/api/products/${id}`, { method: 'DELETE' }); pushEvent(`deleted ${id}`, 'warn'); await loadProducts(); };
 
     // Script editor
+    // ---- Game image search (Steam, etc.) ----
+    const [imgQ, setImgQ] = useState('');
+    const [imgResults, setImgResults] = useState([]);
+    const [imgLoading, setImgLoading] = useState(false);
+    const [imgExpanded, setImgExpanded] = useState(null); // appid whose variants are shown
+    const [imgPicking, setImgPicking] = useState(false);
+    useEffect(() => {
+        if (!imgQ || imgQ.trim().length < 2) { setImgResults([]); return; }
+        const t = setTimeout(async () => {
+            setImgLoading(true);
+            try {
+                const r = await fetch(`/api/imgsearch?q=${encodeURIComponent(imgQ.trim())}`);
+                const j = await r.json();
+                setImgResults(j.results || []);
+            } catch { setImgResults([]); }
+            setImgLoading(false);
+        }, 280);
+        return () => clearTimeout(t);
+    }, [imgQ]);
+    // Fetch a chosen preview through our proxy, convert to a File, plug it
+    // into the upload form (or straight into a product update).
+    const pickImageFromUrl = async (url, targetId) => {
+        setImgPicking(true);
+        try {
+            const r = await fetch(`/api/imgproxy?url=${encodeURIComponent(url)}`);
+            if (!r.ok) throw new Error('proxy ' + r.status);
+            const blob = await r.blob();
+            const ext = (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+            const file = new File([blob], `game.${ext}`, { type: blob.type });
+            if (targetId) {
+                await updateProduct(targetId, { image: file });
+            } else {
+                setUpload((u) => ({ ...u, image: file }));
+            }
+            setImgExpanded(null);
+        } catch (e) {
+            pushEvent('image pick failed: ' + e.message, 'bad');
+        }
+        setImgPicking(false);
+    };
+
     const [scriptEditor, setScriptEditor] = useState(null);
     const openScriptEditor = (p) => {
         const existing = Array.isArray(p.script) ? p.script : [];
@@ -597,8 +638,77 @@ export default function Page() {
                                 <input id="exeInput" type="file" accept=".exe" onChange={(e) => setUpload(u => ({ ...u, exe: e.target.files?.[0] || null }))}/>
                                 <span className="file-hint">{upload.exe ? `${upload.exe.name} · ${(upload.exe.size/1024).toFixed(1)} KB` : 'Choose file'}</span>
                             </label>
+
+                            {/* Game image search — Steam-backed. Picking a
+                                variant fetches through /api/imgproxy and
+                                sets upload.image. */}
+                            <div className="game-search">
+                                <div className="game-search-head">
+                                    <span className="file-label">Game image <em>Steam</em></span>
+                                    {upload.image && (
+                                        <span className="picked-chip">
+                                            {upload.image.name}
+                                            <button type="button" className="picked-x" onClick={() => setUpload(u => ({ ...u, image: null }))}>×</button>
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="game-search-box">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                        <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                    </svg>
+                                    <input
+                                        placeholder="Search a game (e.g. CS2, Valorant, Rust)"
+                                        value={imgQ}
+                                        onChange={(e) => setImgQ(e.target.value)}
+                                    />
+                                    {imgLoading && <span className="spinner"/>}
+                                </div>
+                                {imgResults.length > 0 && (
+                                    <div className="game-results">
+                                        {imgResults.map((g) => (
+                                            <div key={g.appid} className={`game-card ${imgExpanded === g.appid ? 'on' : ''}`}>
+                                                <button type="button" className="game-card-head" onClick={() => setImgExpanded(imgExpanded === g.appid ? null : g.appid)}>
+                                                    <div className="game-card-thumb" style={g.icon ? { backgroundImage: `url(/api/imgproxy?url=${encodeURIComponent(g.icon)})` } : undefined}/>
+                                                    <div className="game-card-body">
+                                                        <div className="game-card-name">{g.name}</div>
+                                                        <div className="game-card-meta">Steam · app {g.appid}</div>
+                                                    </div>
+                                                    <svg className={`game-card-chev ${imgExpanded === g.appid ? 'up' : ''}`} viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                                                        <polyline points="6 9 12 15 18 9"/>
+                                                    </svg>
+                                                </button>
+                                                {imgExpanded === g.appid && (
+                                                    <div className="game-variants">
+                                                        {['header','portrait','hero','capsule'].map((k) => {
+                                                            const src = g.images[k];
+                                                            if (!src) return null;
+                                                            return (
+                                                                <button
+                                                                    key={k}
+                                                                    type="button"
+                                                                    className={`game-variant v-${k}`}
+                                                                    disabled={imgPicking}
+                                                                    onClick={() => pickImageFromUrl(src)}
+                                                                    title={k}
+                                                                >
+                                                                    <img src={`/api/imgproxy?url=${encodeURIComponent(src)}`} alt={k}/>
+                                                                    <span className="v-label">{k}</span>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {imgQ.trim().length >= 2 && !imgLoading && imgResults.length === 0 && (
+                                    <div className="game-empty">No matches for "{imgQ}"</div>
+                                )}
+                            </div>
+
                             <label className="file-field">
-                                <span className="file-label">Image <em>optional</em></span>
+                                <span className="file-label">…or upload image manually <em>optional</em></span>
                                 <input id="imgInput" type="file" accept="image/*" onChange={(e) => setUpload(u => ({ ...u, image: e.target.files?.[0] || null }))}/>
                                 <span className="file-hint">{upload.image ? upload.image.name : 'Choose file'}</span>
                             </label>
