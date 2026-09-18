@@ -152,23 +152,35 @@ export default function Page() {
                 if (r.ok) {
                     const j = await r.json();
                     const now = Date.now();
-                    if (j.online) lastOnlineAtRef.current = now;
-                    const stickyOnline = (now - lastOnlineAtRef.current) < 45_000;
-                    if (j.online) setLoaderConnected(true);
+                    if (j.online) {
+                        lastOnlineAtRef.current = now;
+                        setLoaderConnected(true);
+                    }
                     setState((prev) => ({
                         ...prev,
-                        online: stickyOnline || j.online,
-                        count:  (stickyOnline || j.online) ? 1 : 0,
-                        agents: (stickyOnline || j.online) ? [{ id: s, addr: 'https poll', connectedAt: j.lastSeen || Date.now() }] : [],
+                        online: !!j.online,
+                        count:  j.online ? 1 : 0,
+                        agents: j.online ? [{ id: s, addr: 'https poll', connectedAt: j.lastSeen || Date.now() }] : [],
                     }));
+                    // Loader has been quiet for too long → dashboard is
+                    // stale. Kick back to the landing page (drops the
+                    // session param, forces re-connection). "No loader,
+                    // no dashboard" — no way to bypass.
+                    if (loaderConnected && !j.online && lastOnlineAtRef.current > 0
+                        && (now - lastOnlineAtRef.current) > 10_000) {
+                        const u = new URL(window.location.href);
+                        u.searchParams.delete('session');
+                        window.location.replace(u.toString());
+                        return;
+                    }
                 }
             } catch {}
             if (alive) setCheckingLoader(false);
         };
         check();
-        const iv = setInterval(check, 3000);
+        const iv = setInterval(check, 2500);
         return () => { alive = false; clearInterval(iv); };
-    }, []);
+    }, [loaderConnected]);
 
     const [screen, setScreen] = useState('home');
     const [modal, setModal]   = useState(null); // 'admin' | 'settings' | 'script' | null

@@ -17,7 +17,10 @@ const redis    = HAS_KV ? new Redis({ url: KV_URL, token: KV_TOKEN }) : null;
 
 const QUEUE_KEY = (id) => `yh:q:${id}`;
 const SEEN_KEY  = (id) => `yh:seen:${id}`;
-const SEEN_TTL  = 60;
+// 15s: loader polls every 3s, so 5 missed polls = declared offline.
+// Fast-enough turnaround that closing the loader kicks the dashboard
+// back to the landing within ~10s.
+const SEEN_TTL  = 15;
 
 if (!globalThis.__yh_loader_queue) globalThis.__yh_loader_queue = new Map();
 if (!globalThis.__yh_loader_seen)  globalThis.__yh_loader_seen  = new Map();

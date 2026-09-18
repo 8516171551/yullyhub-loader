@@ -10,7 +10,9 @@ import { seen } from '../../../../lib/command-queue.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ONLINE_TTL_MS = 60 * 1000;
+// Match command-queue.js — 15s so the dashboard boots back to the
+// landing page quickly when the loader disappears.
+const ONLINE_TTL_MS = 15 * 1000;
 
 const KV_URL   = process.env.KV_REST_API_URL   || process.env.UPSTASH_REDIS_REST_URL;
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
