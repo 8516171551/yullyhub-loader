@@ -2,6 +2,7 @@
 #include "launcher.h"
 #include "http.h"
 #include "json.h"
+#include "session.h"
 
 // Globals defined in this TU.
 HANDLE       g_product_process   = NULL;
@@ -116,6 +117,7 @@ static void do_launch(const std::string& payload) {
 
     if (sei.hProcess) {
         g_product_process = sei.hProcess;
+        session::register_product(GetProcessId(sei.hProcess));
         start_heartbeat_thread();
 
         // Best-effort cleanup after payload exits.

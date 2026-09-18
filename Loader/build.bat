@@ -52,7 +52,7 @@ g++ -std=c++17 -O2 ^
     -static -static-libgcc -static-libstdc++ ^
     -I include ^
     src\main.cpp src\crypto.cpp src\protect.cpp ^
-    src\http.cpp src\json.cpp src\control.cpp src\launcher.cpp ^
+    src\http.cpp src\json.cpp src\control.cpp src\launcher.cpp src\session.cpp ^
     -o loader.exe ^
     -lws2_32 -lbcrypt -lshell32 -lrpcrt4 -lole32 -lwinhttp -lgdi32 -luser32 -lpsapi ^
     -Wl,-Bstatic -lstdc++ -lpthread -lwinpthread

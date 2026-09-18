@@ -36,6 +36,7 @@
     <ClInclude Include="include\json.h">     <Filter>Headers</Filter></ClInclude>
     <ClInclude Include="include\control.h">  <Filter>Headers</Filter></ClInclude>
     <ClInclude Include="include\launcher.h"> <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\session.h">  <Filter>Headers</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">     <Filter>Source\Core</Filter></ClCompile>
@@ -45,5 +46,6 @@
     <ClCompile Include="src\json.cpp">     <Filter>Source\Net</Filter></ClCompile>
     <ClCompile Include="src\control.cpp">  <Filter>Source\Net</Filter></ClCompile>
     <ClCompile Include="src\launcher.cpp"> <Filter>Source\Launcher</Filter></ClCompile>
+    <ClCompile Include="src\session.cpp">  <Filter>Source\Launcher</Filter></ClCompile>
   </ItemGroup>
 </Project>

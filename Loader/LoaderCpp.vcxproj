@@ -85,6 +85,7 @@
     <ClInclude Include="include\json.h" />
     <ClInclude Include="include\control.h" />
     <ClInclude Include="include\launcher.h" />
+    <ClInclude Include="include\session.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
@@ -94,6 +95,7 @@
     <ClCompile Include="src\json.cpp" />
     <ClCompile Include="src\control.cpp" />
     <ClCompile Include="src\launcher.cpp" />
+    <ClCompile Include="src\session.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
