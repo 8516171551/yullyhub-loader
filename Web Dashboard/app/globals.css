@@ -820,8 +820,20 @@ input, select {
 /* =========================================================
    IslandPill — bottom-center, iOS-style spring expand
    ========================================================= */
-.ui.hidden { display: none !important; }
-body { background: #000; }
+/* /island page: transparent full-viewport container, only the pill visible */
+.island-page {
+    position: fixed; inset: 0;
+    background: transparent;
+    pointer-events: none;
+    display: block;
+}
+.island-page .island-wrap {
+    position: fixed;
+    left: 50%; top: 50%;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+}
+html:has(.island-page), body:has(.island-page) { background: transparent !important; }
 
 .island-wrap {
     position: fixed;
@@ -926,6 +938,34 @@ body { background: #000; }
     font-weight: 600;
     color: #f5f5f7;
     flex-shrink: 0;
+}
+
+/* =========================================================
+   Launching veil — shown briefly after Launch click, until the
+   loader kills this browser and opens its own pill window.
+   ========================================================= */
+.launching-veil {
+    position: fixed; inset: 0;
+    background: rgba(3, 3, 6, 0.88);
+    backdrop-filter: blur(6px);
+    display: grid; place-items: center;
+    z-index: 550;
+    animation: fade-in 160ms ease-out;
+}
+.launching-card {
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    padding: 32px 44px;
+    text-align: center;
+}
+.launching-text {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    margin-top: 4px;
+}
+.launching-sub {
+    color: var(--muted);
+    font-size: 12.5px;
 }
 
 /* =========================================================

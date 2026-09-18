@@ -30,95 +30,10 @@ function LandingPage({ session, checking }) {
     );
 }
 
-// --------------------------------------------------------------------------
-// IslandPill — in-browser Dynamic Island
-// --------------------------------------------------------------------------
-// Prepend a loading step to any script that doesn't start with one.
-// Loading is the "injecting…" spinner phase the user sees immediately
-// after clicking Launch.
-function withLoadingStep(script) {
-    if (!script || !Array.isArray(script.steps) || !script.steps.length) return script;
-    const first = script.steps[0];
-    if (first.kind === 'loading') return script;
-    return {
-        ...script,
-        steps: [{ kind: 'loading', text: 'Injecting', timeout: 2.4 }, ...script.steps],
-    };
-}
-
-function IslandPill({ script: rawScript, onFinish }) {
-    const script = useMemo(() => withLoadingStep(rawScript), [rawScript]);
-    const [idx, setIdx] = useState(0);
-    const [gen, setGen] = useState(0);
-    useEffect(() => {
-        if (!script) return;
-        setIdx(0);
-        setGen((g) => g + 1);
-    }, [script]);
-    useEffect(() => {
-        if (!script) return;
-        const step = script.steps[idx];
-        if (!step) { onFinish?.(); return; }
-        const myGen = gen;
-        const timeoutMs = Math.max(600, (step.timeout ?? 2) * 1000);
-        let t;
-        if (step.dismiss === 'keybind' || step.dismiss === 'both') {
-            const key = (step.keybind || '').toLowerCase();
-            const onKey = (e) => {
-                if ((e.key || '').toLowerCase() === key) {
-                    if (myGen !== gen) return;
-                    setIdx((i) => i + 1);
-                    window.removeEventListener('keydown', onKey);
-                }
-            };
-            window.addEventListener('keydown', onKey);
-            if (step.dismiss === 'both') {
-                t = setTimeout(() => { if (myGen === gen) setIdx((i) => i + 1); }, timeoutMs);
-            }
-            return () => {
-                window.removeEventListener('keydown', onKey);
-                if (t) clearTimeout(t);
-            };
-        }
-        t = setTimeout(() => { if (myGen === gen) setIdx((i) => i + 1); }, timeoutMs);
-        return () => clearTimeout(t);
-    }, [script, idx, gen, onFinish]);
-
-    if (!script) return null;
-    const step = script.steps[idx];
-    if (!step) return null;
-    const kind = step.kind || 'message';
-    // Non-loading steps ARE clickable to advance; loading step blocks clicks.
-    const clickable = kind !== 'loading';
-    return (
-        <div className={`island-wrap island-${kind}`}>
-            {/* key on step index → re-mount → CSS keyframe fires per step,
-                giving the iOS-style content pop/settle on every advance. */}
-            <div
-                key={idx}
-                className="island-pill"
-                onClick={() => { if (clickable) setIdx((i) => i + 1); }}
-            >
-                {kind === 'loading' && (
-                    <span className="island-loader" aria-hidden="true">
-                        <span className="dot"/><span className="dot"/><span className="dot"/>
-                    </span>
-                )}
-                {kind === 'success' && (
-                    <span className="island-check">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="20 6 9 17 4 12"/>
-                        </svg>
-                    </span>
-                )}
-                <span className="island-text">{step.text || (kind === 'close' ? 'Click to close' : '')}</span>
-                {(step.dismiss === 'keybind' || step.dismiss === 'both') && step.keybind && (
-                    <span className="island-kbd">{step.keybind}</span>
-                )}
-            </div>
-        </div>
-    );
-}
+// The dynamic-island pill lives in its own /island page now — the loader
+// spawns a tiny standalone Chrome window for it after a launch. The
+// dashboard never renders the pill directly, so it can't get hidden
+// behind the dashboard's own layout.
 
 function Clock() {
     const [t, setT] = useState('');
@@ -169,14 +84,11 @@ export default function Page() {
 
     // Sticky online tracking (see command-queue.js for the server-side story)
     const lastOnlineAtRef = useRef(0);
-    const [loaderLocalUrl, setLoaderLocalUrl] = useState(null);
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const url = new URL(window.location.href);
         const s = url.searchParams.get('session');
-        const l = url.searchParams.get('loader');
         setSession(s);
-        if (l) setLoaderLocalUrl(l);
         if (!s) { setCheckingLoader(false); return; }
 
         let alive = true;
@@ -266,20 +178,10 @@ export default function Page() {
         return () => { alive = false; try { ws?.close(); } catch {} };
     }, [loadProducts]);
 
+    // All commands go through Vercel's queue. Loader polls /api/loader/poll
+    // every 500ms and drains. No direct 127.0.0.1 → no Local Network Access
+    // dialog, no device permission required.
     const sendCommand = async (payload) => {
-        if (loaderLocalUrl) {
-            try {
-                await fetch(loaderLocalUrl.replace(/\/$/, '') + '/command', {
-                    method: 'POST', mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain' },
-                    body: JSON.stringify(payload),
-                });
-                pushEvent(`direct → ${payload.type}`, 'ok');
-                return { ok: true, direct: true };
-            } catch (e) {
-                pushEvent('direct send failed, falling back: ' + e.message, 'warn');
-            }
-        }
         try {
             const r = await fetch('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -287,14 +189,6 @@ export default function Page() {
             });
             return await r.json();
         } catch (e) { pushEvent('send failed: ' + e.message, 'bad'); return null; }
-    };
-
-    const [islandScript, setIslandScript] = useState(null);
-    const islandSend = (msg) => {
-        try { if (wsRef.current?.readyState === 1) wsRef.current.send(JSON.stringify(msg)); } catch {}
-        if (msg?.action === 'script' && Array.isArray(msg.steps)) {
-            setIslandScript({ product: msg.product || 'product', steps: msg.steps });
-        }
     };
 
     const list = useMemo(() => products.map((p) => ({
@@ -316,23 +210,17 @@ export default function Page() {
         if (selectedId && !list.find(p => p.id === selectedId) && list.length > 0) setSelectedId(list[0].id);
     }, [list, selectedId]);
 
-    // ---- Launch flow ----
-    // Island opens IMMEDIATELY (with an auto-prepended loading step) so the
-    // customer sees the injecting-spinner as soon as they click Launch.
-    // The dashboard hides itself under CSS the moment islandScript is set.
+    // Launch flow — pure API. Dashboard dispatches launch + island commands
+    // to /api/command. The loader polls, downloads the product, kills THIS
+    // browser window, and opens a small standalone /island window at the
+    // bottom of the screen. From that point the dashboard is out of play.
+    const [launching, setLaunching] = useState(false);
     const handleStart = async () => {
         if (!selected) return;
         const target = selected;
         setLaunchCount((c) => c + 1);
+        setLaunching(true);
         const productName = target.name || target.title || 'product';
-
-        // Fetch the latest script + auth token in parallel with kicking off
-        // the loader command. We show the island with a loading step first
-        // and swap in the real script once it lands (usually <100ms).
-        setIslandScript({
-            product: productName,
-            steps: [{ kind: 'loading', text: `Injecting ${productName}`, timeout: 60 }],
-        });
 
         const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
         const [tokenRes, scriptRes] = await Promise.all([
@@ -357,14 +245,24 @@ export default function Page() {
         ]);
         if (tokenRes) pushEvent(`auth: token ${tokenRes.slice(0,8)}…`, 'ok');
 
-        sendCommand({ type: 'launch', productId: target.id, title: target.title, url, token: tokenRes, apiHost: `${location.protocol}//${location.host}` });
-
         const scriptSteps = Array.isArray(scriptRes) && scriptRes.length ? scriptRes :
             [{ kind: 'message', text: `${productName} loaded`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
-        // Replace the placeholder loading step's script with the real one —
-        // withLoadingStep() will re-prepend its own uniform loading step so
-        // the transition is: loading → user's real script steps.
-        setIslandScript({ product: productName, steps: scriptSteps });
+
+        // Two commands, drained in order. Loader spawns the pill window
+        // after launching the product.
+        await sendCommand({
+            type: 'launch',
+            productId: target.id,
+            title: target.title,
+            url,
+            token: tokenRes,
+            apiHost: `${location.protocol}//${location.host}`,
+        });
+        await sendCommand({
+            type: 'island',
+            product: productName,
+            script: scriptSteps,
+        });
     };
 
     // ---- Admin ----
@@ -497,14 +395,6 @@ export default function Page() {
     }
 
     const closeLoader = async () => {
-        if (loaderLocalUrl) {
-            try {
-                await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
-                    method: 'POST', mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain' }, body: '',
-                });
-            } catch {}
-        }
         try {
             await fetch('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -514,20 +404,18 @@ export default function Page() {
         try { window.close(); } catch {}
     };
 
-    // Once the Dynamic Island opens the dashboard is gone — only the pill
-    // is on-screen. We hide the .ui shell entirely; body bg stays dark.
-    const islandActive = !!islandScript;
-
     return (
         <>
-            {/* IslandPill is rendered OUTSIDE the .ui shell so it stays
-                visible when the dashboard collapses to `hidden`. */}
-            <IslandPill script={islandScript} onFinish={async () => {
-                setIslandScript(null);
-                await closeLoader();
-            }} />
-
-            <div className={`ui ${islandActive ? 'hidden' : ''}`}>
+            {launching && (
+                <div className="launching-veil">
+                    <div className="launching-card">
+                        <span className="spinner big"/>
+                        <div className="launching-text">Launching {selected?.name}…</div>
+                        <div className="launching-sub">The loader is taking over.</div>
+                    </div>
+                </div>
+            )}
+            <div className="ui">
 
             <header className="topbar">
                 <div className="brand">
@@ -623,7 +511,7 @@ export default function Page() {
                                     </div>
                                     <button
                                         className="launch-btn"
-                                        disabled={!state.online || islandActive}
+                                        disabled={!state.online || launching}
                                         onClick={handleStart}
                                     >
                                         Launch
@@ -647,7 +535,7 @@ export default function Page() {
                                     </div>
                                     <div className="detail-card">
                                         <div className="detail-card-k">Delivery</div>
-                                        <div className="detail-card-v">{loaderLocalUrl ? 'Direct' : 'Cloud'}</div>
+                                        <div className="detail-card-v">Cloud API</div>
                                     </div>
                                 </div>
 

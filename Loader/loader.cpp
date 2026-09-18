@@ -400,6 +400,39 @@ static bool wh_get_bytes(const std::string& host, int port, bool https,
     return sc == 200;
 }
 
+// Extract the raw JSON value (as a substring) at `key`. Handles arrays,
+// objects, numbers, strings, bools, null. Bracket-balanced walk with
+// string-escape awareness.
+static std::string extract_array(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    size_t p = json.find(needle);
+    if (p == std::string::npos) return "";
+    p = json.find(':', p);
+    if (p == std::string::npos) return "";
+    p++;
+    while (p < json.size() && (json[p] == ' ' || json[p] == '\t' || json[p] == '\n' || json[p] == '\r')) p++;
+    if (p >= json.size()) return "";
+    char open = json[p];
+    if (open == '[' || open == '{') {
+        char close = (open == '[') ? ']' : '}';
+        size_t start = p;
+        int depth = 0;
+        bool inStr = false, esc = false;
+        while (p < json.size()) {
+            char c = json[p];
+            if (esc) { esc = false; p++; continue; }
+            if (c == '\\') { esc = true; p++; continue; }
+            if (c == '"') { inStr = !inStr; p++; continue; }
+            if (!inStr) {
+                if (c == open) depth++;
+                else if (c == close) { depth--; if (depth == 0) { p++; return json.substr(start, p - start); } }
+            }
+            p++;
+        }
+    }
+    return "";
+}
+
 // Naive JSON walker — pulls out each top-level object inside an array
 // under `key`. Only used for the polling response's "commands" field.
 static std::vector<std::string> extract_object_array(const std::string& json, const std::string& key) {
@@ -1257,6 +1290,169 @@ static void handle_command(const std::string& payload) {
 
     if (type == "welcome") return;
 
+    if (type == "island") {
+        // Dashboard has finished orchestrating a launch. Kill the current
+        // kiosk browser (that was the dashboard) and open a tiny, topmost,
+        // borderless Chrome window pointing at /island — a standalone
+        // dynamic-island page that plays the script and calls window.close
+        // + POSTs shutdown when it's done.
+        extern HANDLE g_browser_process;
+        extern DWORD  g_browser_pid;
+        extern std::string g_api_host;
+        extern int         g_api_port;
+        extern bool        g_api_https;
+
+        std::string scriptJson = extract_array(payload, "script");
+        std::string product    = extract_str(payload, "product");
+        if (product.empty()) product = "product";
+        if (scriptJson.empty()) scriptJson = "[]";
+
+        // Percent-encode the JSON so it survives the URL.
+        auto pctEncode = [](const std::string& in) {
+            static const char* hex = "0123456789ABCDEF";
+            std::string out; out.reserve(in.size() * 3);
+            for (unsigned char c : in) {
+                if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') || c == '-' || c == '_' || c == '.' || c == '~') {
+                    out.push_back((char)c);
+                } else {
+                    out.push_back('%');
+                    out.push_back(hex[c >> 4]);
+                    out.push_back(hex[c & 0xF]);
+                }
+            }
+            return out;
+        };
+
+        std::string scheme = g_api_https ? "https://" : "http://";
+        std::string url = scheme + g_api_host;
+        if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80)) {
+            url += ":" + std::to_string(g_api_port);
+        }
+        url += "/island?script=" + pctEncode(scriptJson) + "&product=" + pctEncode(product);
+
+        // Kill the current dashboard browser first.
+        HANDLE oldBrowser = g_browser_process;
+        DWORD  oldPid     = g_browser_pid;
+        g_browser_process = NULL;
+        g_browser_pid     = 0;
+
+        struct BrowserSpec { const char* path; const char* privateFlag; };
+        BrowserSpec browsers[] = {
+            {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",         "--incognito"},
+            {"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",   "--incognito"},
+            {"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  "--inprivate"},
+            {"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",        "--inprivate"},
+            {nullptr, nullptr}
+        };
+
+        // Bottom-center placement.
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        const int PW = 560;
+        const int PH = 130;
+        int px = (sw - PW) / 2;
+        int py = sh - PH - 80;
+
+        char tempDir[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempDir);
+        std::string dataDir = std::string(tempDir) + "yh_pill_" + g_loader_id.substr(0, 8);
+        CreateDirectoryA(dataDir.c_str(), NULL);
+
+        bool spawned = false;
+        for (int i = 0; browsers[i].path; i++) {
+            if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
+            std::string cmd = std::string("\"") + browsers[i].path + "\""
+                            + " " + browsers[i].privateFlag
+                            + " --user-data-dir=\"" + dataDir + "\""
+                            + " --no-first-run --no-default-browser-check"
+                            + " --disable-features=Translate,MediaRouter"
+                            + " --window-size=" + std::to_string(PW) + "," + std::to_string(PH)
+                            + " --window-position=" + std::to_string(px) + "," + std::to_string(py)
+                            + " --app=\"" + url + "\"";
+            STARTUPINFOA si{}; si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWNORMAL;
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
+                               DETACHED_PROCESS,
+                               NULL, NULL, &si, &pi)) {
+                CloseHandle(pi.hThread);
+                g_browser_process = pi.hProcess;
+                g_browser_pid     = pi.dwProcessId;
+                std::cout << "[loader] pill window spawned pid=" << pi.dwProcessId << std::endl;
+                spawned = true;
+
+                // Try to strip the title bar + set topmost after the window
+                // is up. Runs on a helper thread so we don't block.
+                DWORD targetPid = pi.dwProcessId;
+                int wx = px, wy = py, ww = PW, wh = PH;
+                std::thread([targetPid, wx, wy, ww, wh]() {
+                    for (int tries = 0; tries < 40; ++tries) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        HWND found = NULL;
+                        struct Data { DWORD pid; HWND result; } d = { targetPid, NULL };
+                        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+                            Data* dd = (Data*)lp;
+                            DWORD wpid = 0;
+                            GetWindowThreadProcessId(h, &wpid);
+                            if (wpid == dd->pid && IsWindowVisible(h)) {
+                                char cls[64];
+                                GetClassNameA(h, cls, 64);
+                                // chrome uses "Chrome_WidgetWin_1" for its main window
+                                if (strstr(cls, "Chrome_Widget") || strstr(cls, "Widget")) {
+                                    dd->result = h;
+                                    return FALSE;
+                                }
+                            }
+                            return TRUE;
+                        }, (LPARAM)&d);
+                        found = d.result;
+                        if (!found) continue;
+
+                        LONG_PTR style  = GetWindowLongPtrA(found, GWL_STYLE);
+                        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+                        style |= WS_POPUP;
+                        SetWindowLongPtrA(found, GWL_STYLE, style);
+
+                        LONG_PTR ex     = GetWindowLongPtrA(found, GWL_EXSTYLE);
+                        ex |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+                        SetWindowLongPtrA(found, GWL_EXSTYLE, ex);
+
+                        SetWindowPos(found, HWND_TOPMOST, wx, wy, ww, wh,
+                                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
+                        std::cout << "[loader] pill window styled borderless + topmost" << std::endl;
+                        break;
+                    }
+                }).detach();
+
+                // When the pill window closes (user clicked, script ended,
+                // whatever), tear the whole session down.
+                HANDLE watch = pi.hProcess;
+                std::thread([watch]() {
+                    WaitForSingleObject(watch, INFINITE);
+                    std::cout << "[loader] pill closed, shutting down" << std::endl;
+                    extern HANDLE g_kill_switch_job;
+                    if (g_kill_switch_job) { CloseHandle(g_kill_switch_job); g_kill_switch_job = NULL; }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                    ExitProcess(0);
+                }).detach();
+                break;
+            }
+        }
+        if (!spawned) {
+            std::cerr << "[loader] failed to spawn pill browser" << std::endl;
+        }
+
+        // Kill the OLD dashboard browser only after the new one is up.
+        if (oldBrowser) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            TerminateProcess(oldBrowser, 0);
+            CloseHandle(oldBrowser);
+        }
+        return;
+    }
+
     if (type == "shutdown") {
         std::cout << "[loader] shutdown requested — closing browser + self" << std::endl;
         // Try to close the kiosk browser gracefully first, then hard kill.
@@ -1666,9 +1862,6 @@ int main(int argc, char** argv) {
             url += ":" + std::to_string(g_api_port);
         }
         url += "/?session=" + g_loader_id;
-        if (g_local_port > 0) {
-            url += "&loader=http%3A%2F%2F127.0.0.1%3A" + std::to_string(g_local_port);
-        }
 
         struct BrowserSpec { const char* path; const char* privateFlag; };
         BrowserSpec browsers[] = {
