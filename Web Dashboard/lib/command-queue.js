@@ -35,15 +35,31 @@ export async function markSeen(loaderId, info) {
     const last = _seenDebounce.get(loaderId) || 0;
     if (now - last < REFRESH_EVERY_MS) return;
     _seenDebounce.set(loaderId, now);
-    // Touch every non-revoked session for this loaderId. There should be
-    // one live session per loaderId at a time.
+    // Upsert: touch the live session, or create an anonymous heartbeat
+    // row if this loader hasn't gone through /api/auth/handshake yet.
+    // Anonymous rows track online-ness only; they can't launch anything
+    // because /api/products/[id]/exe still requires a valid Bearer token
+    // or cookie session.
     try {
-        await q(
+        const updated = await q(
             `UPDATE yh_loader_sessions
-                SET last_seen_at = CURRENT_TIMESTAMP
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    user_agent   = COALESCE(?, user_agent)
               WHERE loader_id = ? AND revoked_at IS NULL`,
-            [loaderId]
+            [info?.ua || null, loaderId]
         );
+        if (!updated || updated.affectedRows === 0) {
+            const crypto = await import('crypto');
+            const id = crypto.randomUUID();
+            const tok = crypto.randomBytes(32).toString('hex');
+            await q(
+                `INSERT INTO yh_loader_sessions
+                    (id, license_key, loader_id, session_token, user_agent)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE last_seen_at = CURRENT_TIMESTAMP`,
+                [id, '_ANON_', loaderId, tok, info?.ua || null]
+            );
+        }
     } catch {}
 }
 
