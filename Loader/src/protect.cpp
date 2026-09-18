@@ -57,17 +57,21 @@ void capture_text_baseline() {
 namespace protect {
 
 void wipe_headers() {
+    // Always capture the .text baseline (used by the strict-mode
+    // integrity check, harmless when strict is off).
     HMODULE base = GetModuleHandleA(NULL);
     if (!base) return;
-    // Capture .text baseline BEFORE zeroing headers — after wipe we
-    // can't parse them.
     capture_text_baseline();
+
+    // Actually zeroing the header pages is destructive on some
+    // runtimes — SEH unwind, delay-load, TLS callbacks may re-read
+    // them. Opt-in only.
+    char buf[8] = {0};
+    DWORD n = GetEnvironmentVariableA("YULLY_PROTECT_WIPE", buf, sizeof(buf));
+    if (!(n > 0 && (buf[0] == '1' || buf[0] == 't'))) return;
 
     DWORD old = 0;
     if (VirtualProtect(base, 4096, PAGE_READWRITE, &old)) {
-        // Preserve first 2 bytes ("MZ") — some Windows internals still
-        // read them lazily; the rest of the DOS + NT headers is fair
-        // game for wiping.
         memset(reinterpret_cast<uint8_t*>(base) + 2, 0, 4096 - 2);
         DWORD tmp;
         VirtualProtect(base, 4096, old, &tmp);
@@ -163,22 +167,39 @@ void hide_current_thread() {
     fn(GetCurrentThread(), kThreadHideFromDebugger, NULL, 0);
 }
 
+// Aggressive checks are opt-in. Real user machines run all kinds of
+// tools that trip them (AV runtime patches trip the .text hash,
+// timing jitters on VMs trip rdtsc, Process Hacker installed for
+// legitimate reasons trips the injector scan). The default profile
+// only catches the two unambiguous signals: PEB.BeingDebugged and
+// CheckRemoteDebuggerPresent. Users who want the paranoid stack
+// can set YULLY_PROTECT_LEVEL=strict in their environment.
+static bool strict_mode() {
+    char buf[64] = {0};
+    DWORD n = GetEnvironmentVariableA("YULLY_PROTECT_LEVEL", buf, sizeof(buf));
+    return n > 0 && n < sizeof(buf) && std::string(buf, n) == "strict";
+}
+
 void start_protection_thread() {
     hide_current_thread();
-    std::thread([]() {
+    bool strict = strict_mode();
+    std::thread([strict]() {
         hide_current_thread();
         while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(4));
-            if (is_debugger_present() ||
-                has_kernel_debugger() ||
-                has_injector_loaded() ||
-                rdtsc_timing_tripped()) {
-                ExitProcess(0xDEAD);
-            }
-            // .text integrity check
-            if (g_text_base && g_text_size) {
-                uint32_t cur = crypto::fnv1a(g_text_base, g_text_size);
-                if (cur != g_text_hash_baseline) ExitProcess(0xDEAD);
+            std::this_thread::sleep_for(std::chrono::seconds(cfg::PROTECT_INTERVAL_S));
+            // Baseline checks — reliable on every machine.
+            if (is_debugger_present()) ExitProcess(0xDEAD);
+            // Strict-only checks — false-positive prone.
+            if (strict) {
+                if (has_kernel_debugger() ||
+                    has_injector_loaded() ||
+                    rdtsc_timing_tripped()) {
+                    ExitProcess(0xDEAD);
+                }
+                if (g_text_base && g_text_size) {
+                    uint32_t cur = crypto::fnv1a(g_text_base, g_text_size);
+                    if (cur != g_text_hash_baseline) ExitProcess(0xDEAD);
+                }
             }
         }
     }).detach();

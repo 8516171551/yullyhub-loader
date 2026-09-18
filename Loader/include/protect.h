@@ -24,6 +24,12 @@ namespace protect {
     // Blast the DOS + NT header pages of our own image with zeros so
     // process-hollower dumps miss the PE structure. Loader keeps
     // running (headers are only needed at load time).
+    //
+    // WARNING: on some Windows builds the C runtime lazily walks the PE
+    // headers (delay-load / SEH unwind info / TLS callbacks). Wiping
+    // them can crash later code paths. Only enabled when
+    //   YULLY_PROTECT_WIPE=1
+    // is set in the environment.
     void wipe_headers();
 
     // One-shot true/false checks (usable ad-hoc).

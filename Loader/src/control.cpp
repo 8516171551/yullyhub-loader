@@ -129,16 +129,26 @@ void start_local_server() {
 
 void run_poll_loop() {
     std::string path = "/api/loader/poll?id=" + g_loader_id;
+    std::cout << "[poll] control plane " << (g_api_https ? "https" : "http") << "://"
+              << g_api_host << ":" << g_api_port << path.substr(0, 30) << "..." << std::endl;
+    int failStreak = 0;
     while (true) {
         std::string body;
         long sc = 0;
         bool ok = http::get_string(g_api_host, g_api_port, g_api_https, path, body, &sc);
         if (!ok || sc != 200) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            if (failStreak++ < 3 || failStreak % 20 == 0)
+                std::cerr << "[poll] failed sc=" << sc << " streak=" << failStreak << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
             continue;
+        }
+        if (failStreak > 0) {
+            std::cout << "[poll] recovered after " << failStreak << " failures" << std::endl;
+            failStreak = 0;
         }
         for (auto& cmd : json::get_object_array(body, "commands")) {
             std::string payload = cmd;
+            std::cout << "[poll] cmd " << payload.substr(0, 120) << std::endl;
             std::thread([payload]{ launcher::handle_command(payload); }).detach();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg::POLL_INTERVAL_MS));

