@@ -1388,42 +1388,71 @@ static void handle_command(const std::string& payload) {
                 DWORD targetPid = pi.dwProcessId;
                 int wx = px, wy = py, ww = PW, wh = PH;
                 std::thread([targetPid, wx, wy, ww, wh]() {
-                    for (int tries = 0; tries < 40; ++tries) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        HWND found = NULL;
-                        struct Data { DWORD pid; HWND result; } d = { targetPid, NULL };
+                    // Find the browser's main top-level window. Chrome creates
+                    // many child/helper HWNDs; we want the ONE with class
+                    // "Chrome_WidgetWin_1", no parent, non-zero size, and a
+                    // window title (the /island page sets document.title).
+                    auto findMainWnd = [](DWORD pid) -> HWND {
+                        struct Data { DWORD pid; HWND result; RECT bestRc; } d = { pid, NULL, {0,0,0,0} };
                         EnumWindows([](HWND h, LPARAM lp) -> BOOL {
                             Data* dd = (Data*)lp;
                             DWORD wpid = 0;
                             GetWindowThreadProcessId(h, &wpid);
-                            if (wpid == dd->pid && IsWindowVisible(h)) {
-                                char cls[64];
-                                GetClassNameA(h, cls, 64);
-                                // chrome uses "Chrome_WidgetWin_1" for its main window
-                                if (strstr(cls, "Chrome_Widget") || strstr(cls, "Widget")) {
-                                    dd->result = h;
-                                    return FALSE;
-                                }
-                            }
+                            if (wpid != dd->pid) return TRUE;
+                            if (!IsWindowVisible(h)) return TRUE;
+                            if (GetParent(h) != NULL) return TRUE;
+                            char cls[64] = {0};
+                            GetClassNameA(h, cls, 64);
+                            if (strcmp(cls, "Chrome_WidgetWin_1") != 0) return TRUE;
+                            RECT r;
+                            if (!GetWindowRect(h, &r)) return TRUE;
+                            int w = r.right - r.left, ht = r.bottom - r.top;
+                            if (w < 200 || ht < 50) return TRUE;
+                            // Pick the largest visible top-level match — main
+                            // window beats DevTools split, tooltips, etc.
+                            int cw = dd->bestRc.right - dd->bestRc.left;
+                            int cht = dd->bestRc.bottom - dd->bestRc.top;
+                            if (w * ht > cw * cht) { dd->result = h; dd->bestRc = r; }
                             return TRUE;
                         }, (LPARAM)&d);
-                        found = d.result;
-                        if (!found) continue;
+                        return d.result;
+                    };
 
-                        LONG_PTR style  = GetWindowLongPtrA(found, GWL_STYLE);
-                        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
-                        style |= WS_POPUP;
-                        SetWindowLongPtrA(found, GWL_STYLE, style);
-
-                        LONG_PTR ex     = GetWindowLongPtrA(found, GWL_EXSTYLE);
-                        ex |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-                        SetWindowLongPtrA(found, GWL_EXSTYLE, ex);
-
-                        SetWindowPos(found, HWND_TOPMOST, wx, wy, ww, wh,
-                                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
-                        std::cout << "[loader] pill window styled borderless + topmost" << std::endl;
-                        break;
+                    HWND found = NULL;
+                    for (int tries = 0; tries < 80; ++tries) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        found = findMainWnd(targetPid);
+                        if (found) break;
                     }
+                    if (!found) {
+                        std::cerr << "[loader] pill window HWND not found" << std::endl;
+                        return;
+                    }
+
+                    // Apply borderless + topmost. Chrome re-normalises styles
+                    // during its early paint phases, so we hammer it a few
+                    // times over the first second.
+                    auto restyle = [&](HWND h) {
+                        LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
+                        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+                                   WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER);
+                        style |= WS_POPUP;
+                        SetWindowLongPtrA(h, GWL_STYLE, style);
+
+                        LONG_PTR ex = GetWindowLongPtrA(h, GWL_EXSTYLE);
+                        ex |= (WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
+                        ex &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
+                        SetWindowLongPtrA(h, GWL_EXSTYLE, ex);
+
+                        SetWindowPos(h, HWND_TOPMOST, wx, wy, ww, wh,
+                                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
+                    };
+
+                    for (int i = 0; i < 8; i++) {
+                        restyle(found);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                    }
+                    std::cout << "[loader] pill window styled borderless + topmost" << std::endl;
                 }).detach();
 
                 // When the pill window closes (user clicked, script ended,

@@ -820,10 +820,11 @@ input, select {
 /* =========================================================
    IslandPill — bottom-center, iOS-style spring expand
    ========================================================= */
-/* /island page: transparent full-viewport container, only the pill visible */
+/* /island page: solid black fill so the pill sits on a clean dark canvas
+   regardless of Chrome's default page background. */
 .island-page {
     position: fixed; inset: 0;
-    background: transparent;
+    background: #000;
     pointer-events: none;
     display: block;
 }
@@ -833,7 +834,7 @@ input, select {
     bottom: auto;
     transform: translate(-50%, -50%);
 }
-html:has(.island-page), body:has(.island-page) { background: transparent !important; }
+html:has(.island-page), body:has(.island-page) { background: #000 !important; }
 
 .island-wrap {
     position: fixed;
