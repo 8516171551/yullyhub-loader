@@ -104,7 +104,11 @@ static void do_launch(const std::string& payload) {
         if (err == ERROR_CANCELLED) { DeleteFileA(outPath.c_str()); return; }
         STARTUPINFOA si{}; si.cb = sizeof(si);
         if (hideWindow) { si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE; }
-        DWORD flags = hideWindow ? CREATE_NO_WINDOW : 0;
+        // CREATE_BREAKAWAY_FROM_JOB so the product survives the loader's
+        // job object closing (either on user X-click shutdown or on any
+        // other loader exit). Product must run independently and enforce
+        // the sub itself via its own heartbeat.
+        DWORD flags = (hideWindow ? CREATE_NO_WINDOW : 0) | CREATE_BREAKAWAY_FROM_JOB;
         PROCESS_INFORMATION pi{};
         if (!CreateProcessA(NULL, (LPSTR)outPath.data(), NULL, NULL, FALSE,
                             flags, NULL, NULL, &si, &pi)) {
@@ -144,8 +148,13 @@ void handle_command(const std::string& payload) {
     if (type == "launch") { do_launch(payload); return; }
     if (type == "island") return; // deprecated
     if (type == "shutdown") {
+        // User-initiated shutdown (X button on the dashboard). Loader
+        // detaches from the product and exits itself — the product
+        // stays running in Task Manager and must keep hitting
+        // /api/auth/heartbeat on its own (see Integration Example /
+        // yullyhub.h). Anti-bypass: the product self-terminates when
+        // the server returns valid:false, regardless of loader state.
         if (g_product_process) {
-            TerminateProcess(g_product_process, 0);
             CloseHandle(g_product_process);
             g_product_process = NULL;
         }

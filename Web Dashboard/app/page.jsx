@@ -493,14 +493,18 @@ export default function Page() {
         return <LandingPage session={session} checking={checkingLoader} />;
     }
 
-    const closeLoader = async () => {
-        try {
-            await fetch('/api/command', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'shutdown', loaderId: session }),
-            });
-        } catch {}
-        try { window.close(); } catch {}
+    // X in the top-right: fire-and-forget the shutdown to the loader
+    // (server queue picks it up on next 3s poll) then hard-navigate to
+    // google.de instantly — no waiting on the network. Product that
+    // was already injected stays alive because launcher.cpp spawns it
+    // with CREATE_BREAKAWAY_FROM_JOB + doesn't Terminate on shutdown;
+    // the product's own yullyhub.h heartbeat keeps enforcing the sub.
+    const closeLoader = () => {
+        fetch('/api/command', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'shutdown', loaderId: session }),
+        }).catch(() => {});
+        window.location.replace('https://google.de');
     };
 
     return (
