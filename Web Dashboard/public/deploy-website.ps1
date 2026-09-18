@@ -44,10 +44,18 @@ if (-not (Test-CommandExists pm2)) {
 }
 Write-Host "pm2           : $((pm2 -v).Trim())"
 
-# 3) git
+# 3) git (auto-install via winget if missing)
 if (-not (Test-CommandExists git)) {
-    throw 'git not installed. Install: winget install Git.Git   (then reopen PowerShell)'
+    Write-Host 'git not installed — installing via winget...'
+    winget install --id Git.Git -e --source winget --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    # winget doesn't refresh PATH for the current session — reload it.
+    $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                [System.Environment]::GetEnvironmentVariable('Path','User')
+    if (-not (Test-CommandExists git)) {
+        throw 'git install failed. Install manually: winget install Git.Git   then reopen PowerShell and re-run.'
+    }
 }
+Write-Host "git           : $(((git --version) -split ' ')[-1])"
 
 # 4) Clone or pull
 if (-not (Test-Path $AppDir)) {
