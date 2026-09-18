@@ -313,7 +313,7 @@ export default function Page() {
         // it can't be used as a control surface any more. window.close()
         // is blocked on tabs the user opened themselves, so we redirect
         // instead. Product keeps running in the background either way.
-        window.location.replace('https://www.youtube.com/watch?v=1vmAITU5WdQ');
+        window.location.replace('https://yully.wtf');
     };
 
     // ---- Admin ----
