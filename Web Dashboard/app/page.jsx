@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
-import Script from 'next/script';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 
 // ---------- Landing page (session gate) ----------
 function LandingPage({ session, checking }) {
@@ -14,37 +13,26 @@ function LandingPage({ session, checking }) {
         <div className="landing">
             <div className="landing-inner">
                 <img className="landing-logo" src="/YullyLogo.png" alt="YullyHub" />
-                <div className="landing-brand">YULLYHUB</div>
-                <div className="landing-label">Run:</div>
-                <div className="landing-code-row">
-                    <code className="landing-code">{cmd}</code>
-                    <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied ✓' : 'Copy'}</button>
-                </div>
-                <div className="landing-hint">
+                <div className="landing-brand">YullyHub</div>
+                <div className="landing-sub">
                     {session
                         ? checking
-                            ? 'Waiting for loader to connect…'
-                            : 'Loader not online. Run the command above in PowerShell to start it.'
-                        : 'Open PowerShell, paste the command, hit enter. Your browser will re-open with the dashboard.'}
+                            ? 'Waiting for loader…'
+                            : 'Loader not connected. Run the command in PowerShell.'
+                        : 'Open PowerShell and run:'}
+                </div>
+                <div className="landing-code-row">
+                    <code className="landing-code">{cmd}</code>
+                    <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied' : 'Copy'}</button>
                 </div>
             </div>
         </div>
     );
 }
 
-const rarityFor = (i) => (['Ultra Rare','Very Rare','Rare','Uncommon','Common'])[i % 5];
-const rarityPct = (i) => (((Math.sin(3.1 + i * 1.7) + 1) * 50)).toFixed(2);
-const rankFor = (i) => (['s','a','b','c','d','e','f'])[i % 7];
-
 // --------------------------------------------------------------------------
-// IslandPill — in-browser Dynamic Island replacement
+// IslandPill — in-browser Dynamic Island
 // --------------------------------------------------------------------------
-// The Electron island doesn't ship with the loader (~90 MB electron blob is
-// not part of the loader.exe). So we render the pill IN the same browser
-// window at the top-center, animate through the script steps, and call
-// onFinish when the last "close" step (or the whole script) ends.
-//
-// script.steps ={ kind: 'message'|'success'|'close', text, timeout, dismiss, keybind }[]
 function IslandPill({ script, onFinish }) {
     const [idx, setIdx] = useState(0);
     const [gen, setGen] = useState(0);
@@ -58,8 +46,6 @@ function IslandPill({ script, onFinish }) {
         const step = script.steps[idx];
         if (!step) { onFinish?.(); return; }
         const myGen = gen;
-        // 'close' steps also auto-advance after their timeout; if timeout=0
-        // treat it as "wait for click" — but simplest is to still time it.
         const timeoutMs = Math.max(600, (step.timeout ?? 2) * 1000);
         let t;
         if (step.dismiss === 'keybind' || step.dismiss === 'both') {
@@ -93,7 +79,7 @@ function IslandPill({ script, onFinish }) {
             <div className="island-pill" onClick={() => setIdx((i) => i + 1)}>
                 {kind === 'success' && (
                     <span className="island-check">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="20 6 9 17 4 12"/>
                         </svg>
                     </span>
@@ -112,13 +98,13 @@ function Clock() {
     useEffect(() => {
         const tick = () => {
             const d = new Date();
-            setT(`${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`);
+            setT(`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`);
         };
         tick();
         const iv = setInterval(tick, 30_000);
         return () => clearInterval(iv);
     }, []);
-    return <span className="time font-thin text-white text-3xl">{t}</span>;
+    return <span className="clock">{t}</span>;
 }
 
 export default function Page() {
@@ -154,17 +140,8 @@ export default function Page() {
         };
     }, []);
 
-    // ---- Session detection + STICKY online status ----
-    // We track lastOnlineAt on the client; the pill flips offline only after
-    // 45s of continuous failed polls. A single missed status (e.g. a Vercel
-    // cold-instance hitting an empty `seen` map) doesn't disconnect the UI.
+    // Sticky online tracking (see command-queue.js for the server-side story)
     const lastOnlineAtRef = useRef(0);
-    // Loader's local HTTP endpoint (http://127.0.0.1:<port>). Populated
-    // from the `loader=` query param the loader appends when it opens the
-    // browser. Chrome treats 127.0.0.1 as a secure origin so a https:// page
-    // can POST there without mixed-content blocking — this is what lets us
-    // bypass Vercel serverless (instance-memory isolation was making
-    // commands take 5+ minutes to arrive).
     const [loaderLocalUrl, setLoaderLocalUrl] = useState(null);
     useEffect(() => {
         if (typeof window === 'undefined') return;
@@ -202,19 +179,18 @@ export default function Page() {
     }, []);
 
     const [screen, setScreen] = useState('home');
-    const [selected, setSelected] = useState(0); // 0 = YullyHub profile, 1..N = products
+    const [modal, setModal]   = useState(null); // 'admin' | 'settings' | 'script' | null
+    const [selectedId, setSelectedId] = useState(null);
     const [state, setState] = useState({ online: false, count: 0, agents: [] });
     const [events, setEvents] = useState([]);
     const [injectPct, setInjectPct] = useState(0);
-    const [injectStatus, setInjectStatus] = useState('Processing...');
+    const [injectStatus, setInjectStatus] = useState('Processing…');
     const [products, setProducts] = useState([]);
     const [busy, setBusy] = useState(false);
     const [upload, setUpload] = useState({ exe: null, image: null, title: '' });
     const [launchCount, setLaunchCount] = useState(0);
-    const [scriptsReady, setScriptsReady] = useState(false);
+    const [search, setSearch] = useState('');
     const wsRef = useRef(null);
-    const flickityRef = useRef(null);
-    const flickityElRef = useRef(null);
 
     const pushEvent = (msg, cls = '') => {
         const t = new Date().toLocaleTimeString();
@@ -231,10 +207,6 @@ export default function Page() {
 
     useEffect(() => {
         loadProducts();
-        // Only try the WebSocket on localhost — Vercel serverless can't hold
-        // long-lived connections so the ws:// attempt just spams console
-        // errors on prod. Direct 127.0.0.1 HTTP handles all command delivery
-        // in prod now.
         const isLocal = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
         if (!isLocal) return;
         let alive = true;
@@ -260,15 +232,11 @@ export default function Page() {
         return () => { alive = false; try { ws?.close(); } catch {} };
     }, [loadProducts]);
 
-    // Fire a command at the loader. Prefer the direct 127.0.0.1 path
-    // (instant, no serverless in the middle). Fall back to Vercel's queue
-    // if the loader didn't hand us a local URL (older loader version).
     const sendCommand = async (payload) => {
         if (loaderLocalUrl) {
             try {
                 await fetch(loaderLocalUrl.replace(/\/$/, '') + '/command', {
-                    method: 'POST',
-                    mode: 'no-cors',
+                    method: 'POST', mode: 'no-cors',
                     headers: { 'Content-Type': 'text/plain' },
                     body: JSON.stringify(payload),
                 });
@@ -286,32 +254,41 @@ export default function Page() {
             return await r.json();
         } catch (e) { pushEvent('send failed: ' + e.message, 'bad'); return null; }
     };
-    // In-browser Dynamic Island (replaces the electron overlay which
-    // didn't ship on customer machines). See <IslandPill/> below.
-    const [islandScript, setIslandScript] = useState(null); // { steps: [], product: '' }
+
+    const [islandScript, setIslandScript] = useState(null);
     const islandSend = (msg) => {
-        // Best-effort WS notify for the dev electron island
         try { if (wsRef.current?.readyState === 1) wsRef.current.send(JSON.stringify(msg)); } catch {}
-        // Always render the in-browser island too
         if (msg?.action === 'script' && Array.isArray(msg.steps)) {
             setIslandScript({ product: msg.product || 'product', steps: msg.steps });
         }
     };
 
-    // Products list with a leading "YullyHub Profile" pseudo-item at idx 0
-    const list = products.map((p) => ({
+    const list = useMemo(() => products.map((p) => ({
         ...p,
         name: p.title,
-        desc: `${p.exeName} · ${(p.exeSize / 1024).toFixed(1)} KB`,
-    }));
+        sizeKB: (p.exeSize / 1024).toFixed(1),
+        scripted: Array.isArray(p.script) && p.script.length > 0,
+    })), [products]);
 
-    // ---- Launch flow ----
-    const handleStart = async (productIdx) => {
-        const target = list[productIdx];
-        if (!target) return;
+    const filtered = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        if (!q) return list;
+        return list.filter(p => (p.name || '').toLowerCase().includes(q));
+    }, [list, search]);
+
+    const selected = selectedId ? list.find(p => p.id === selectedId) : (list[0] || null);
+    useEffect(() => {
+        if (!selectedId && list.length > 0) setSelectedId(list[0].id);
+        if (selectedId && !list.find(p => p.id === selectedId) && list.length > 0) setSelectedId(list[0].id);
+    }, [list, selectedId]);
+
+    // ---- Launch flow (unchanged logic) ----
+    const handleStart = async () => {
+        if (!selected) return;
+        const target = selected;
         setScreen('inject');
         setInjectPct(0);
-        setInjectStatus('Processing...');
+        setInjectStatus('Processing…');
         setLaunchCount((c) => c + 1);
         const productName = target.name || target.title || 'product';
 
@@ -337,19 +314,17 @@ export default function Page() {
             p += 3 + Math.random() * 4;
             if (p >= 100) {
                 p = 100; clearInterval(iv);
-                setInjectStatus('Injection complete.');
+                setInjectStatus('Complete');
                 setInjectPct(100);
                 const script = Array.isArray(latestScript) && latestScript.length ? latestScript :
-                    [{ kind: 'message', text: `${productName} loaded!`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
+                    [{ kind: 'message', text: `${productName} loaded`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
                 islandSend({ type: 'island', action: 'script', product: productName, steps: script });
-                // Show the island; the browser stays open until the script
-                // hits a "close" step (or the user hits the X).
-                setTimeout(() => { setScreen('handover'); }, 900);
+                setTimeout(() => { setScreen('home'); }, 500);
             } else setInjectPct(p);
         }, 90);
     };
 
-    // ---- Admin (upload / script editor) ----
+    // ---- Admin ----
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!upload.exe) { pushEvent('pick an .exe first', 'bad'); return; }
@@ -362,7 +337,7 @@ export default function Page() {
             const r = await fetch('/api/products', { method: 'POST', body: form });
             const j = await r.json();
             if (r.ok) {
-                pushEvent(`uploaded "${j.title}" (${(j.exeSize/1024).toFixed(1)} KB)`, 'ok');
+                pushEvent(`uploaded "${j.title}"`, 'ok');
                 setUpload({ exe: null, image: null, title: '' });
                 if (document.getElementById('exeInput')) document.getElementById('exeInput').value = '';
                 if (document.getElementById('imgInput')) document.getElementById('imgInput').value = '';
@@ -396,9 +371,9 @@ export default function Page() {
         const existing = Array.isArray(p.script) ? p.script : [];
         const cloned = existing.length ? existing : [
             { kind: 'message', text: 'Press F2 once you are in game', dismiss: 'keybind', keybind: 'F2', timeout: 30 },
-            { kind: 'message', text: 'Injecting Product…', dismiss: 'timeout', timeout: 3 },
-            { kind: 'success', text: 'Product Injected Successfully', timeout: 2.5 },
-            { kind: 'close', text: 'Click me to close loader', timeout: 4 },
+            { kind: 'message', text: 'Injecting product', dismiss: 'timeout', timeout: 3 },
+            { kind: 'success', text: 'Injected', timeout: 2.5 },
+            { kind: 'close', text: 'Click to close', timeout: 4 },
         ];
         _lastSavedRef.current = existing.length ? JSON.stringify(existing) : '';
         setScriptSaveState('idle');
@@ -407,8 +382,8 @@ export default function Page() {
     const updateStep = (idx, patch) => setScriptEditor(s => s ? { ...s, steps: s.steps.map((st,i) => i===idx ? { ...st, ...patch } : st) } : s);
     const addStep = (kind) => setScriptEditor(s => {
         if (!s) return s;
-        const base = kind==='close' ? { kind:'close', text:'Click me to close loader', timeout:4 }
-                   : kind==='success' ? { kind:'success', text:'Product Injected Successfully', timeout:2.5 }
+        const base = kind==='close' ? { kind:'close', text:'Click to close', timeout:4 }
+                   : kind==='success' ? { kind:'success', text:'Injected', timeout:2.5 }
                    : { kind:'message', text:'Type message…', dismiss:'timeout', timeout:2 };
         return { ...s, steps: [...s.steps, base] };
     });
@@ -432,376 +407,228 @@ export default function Page() {
         return () => clearTimeout(t);
     }, [scriptEditor?.steps, scriptEditor?.id, loadProducts]);
 
-    // ---- Flickity init ----
-    // Re-initialise whenever the product list changes so new tiles render.
-    // NOTE: dropped the source's "shift subsequent slides by 75px on select"
-    // effect — it was an O(N) style.left mutation on every click that forced
-    // a full layout pass per selection. Standard flickity slide is snappy.
-    useEffect(() => {
-        if (!scriptsReady) return;
-        if (typeof window === 'undefined' || !window.Flickity) return;
-        const el = flickityElRef.current;
-        if (!el) return;
-        try { flickityRef.current?.destroy?.(); } catch {}
-        const flkty = new window.Flickity(el, {
-            contain: false,
-            pageDots: false,
-            prevNextButtons: false,
-            percentPosition: false,
-            imagesLoaded: false,      // no images inside — we use CSS bg
-            cellAlign: 'left',
-            draggable: true,
-            friction: 0.5,            // snappier settle
-            selectedAttraction: 0.18, // faster snap-to-cell
-        });
-        flickityRef.current = flkty;
-
-        flkty.on('select', (index) => { setSelected(index); });
-        flkty.select(0, false, true);
-        setSelected(0);
-
-        return () => { try { flkty.destroy(); } catch {} };
-    }, [scriptsReady, list.length]);
-
-    // Landing gate
+    // Gate — no valid session + connected loader → landing page only.
     if (!session || !loaderConnected) {
         return <LandingPage session={session} checking={checkingLoader} />;
     }
 
-    // ---- Derived stats for footer 0 ----
-    const totalProducts = list.length;
-    const scriptedCount = list.filter((p) => Array.isArray(p.script) && p.script.length).length;
-    const completionPct = totalProducts ? ((scriptedCount / totalProducts) * 100).toFixed(2) : '0.00';
-    const rarest        = list.slice().sort((a, b) => (a.exeSize || 0) - (b.exeSize || 0)).slice(0, 5);
-    const recent        = list.slice(-12).reverse();
-    const cabinet       = list.slice(0, 10);
-    const milestones    = list.slice(0, 10);
+    const closeLoader = async () => {
+        if (loaderLocalUrl) {
+            try {
+                await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
+                    method: 'POST', mode: 'no-cors',
+                    headers: { 'Content-Type': 'text/plain' }, body: '',
+                });
+            } catch {}
+        }
+        try {
+            await fetch('/api/command', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'shutdown' }),
+            });
+        } catch {}
+        try { window.close(); } catch {}
+    };
 
     return (
-        <>
-            <Script src="https://cdn.jsdelivr.net/npm/flickity@2.3.0/dist/flickity.pkgd.min.js"
-                    strategy="afterInteractive"
-                    onLoad={() => setScriptsReady(true)} />
+        <div className="ui">
+            {/* Inject progress hairline pinned to the very top edge */}
+            {screen === 'inject' && (
+                <div className="topbar-progress">
+                    <div className="topbar-progress-fill" style={{ width: `${injectPct}%` }}/>
+                </div>
+            )}
 
-            {/* In-page X — the only exit. Fires shutdown at the local loader
-                (direct HTTP), which kills the browser process via its Job Object
-                and then ExitProcess() on itself. window.close() as a belt-and-
-                suspenders fallback (usually blocked in kiosk mode). */}
-            <button className="win-close" onClick={async () => {
-                if (loaderLocalUrl) {
-                    try {
-                        await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
-                            method: 'POST', mode: 'no-cors',
-                            headers: { 'Content-Type': 'text/plain' }, body: '',
-                        });
-                    } catch {}
-                }
-                // Also queue via server (in case loader didn't expose local URL)
-                try {
-                    await fetch('/api/command', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ type: 'shutdown' }),
-                    });
-                } catch {}
-                try { window.close(); } catch {}
-            }} title="Close loader">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                    <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
-                </svg>
-            </button>
-
-            {/* Floating in-browser Dynamic Island */}
             <IslandPill script={islandScript} onFinish={async () => {
                 setIslandScript(null);
-                // If the script ended with a "close" step, tear everything down.
-                if (loaderLocalUrl) {
-                    try {
-                        await fetch(loaderLocalUrl.replace(/\/$/, '') + '/shutdown', {
-                            method: 'POST', mode: 'no-cors',
-                            headers: { 'Content-Type': 'text/plain' }, body: '',
-                        });
-                    } catch {}
-                }
-                try { window.close(); } catch {}
+                await closeLoader();
             }} />
 
-            <div className="grid-container h-screen">
-                <header className="flex flex-row justify-between flex-wrap py-5">
-                    <section className="flex items-center">
-                        <a href="#" className="text-white text-3xl">YullyHub</a>
-                        <div className="hdr-actions">
-                            <span className={`hdr-pill ${state.online ? 'on' : 'off'}`}>
-                                <span className="pip"></span>{state.online ? 'Loader online' : 'no loader'}
-                            </span>
-                            <button className="hdr-btn" onClick={() => setScreen(s => s === 'admin' ? 'home' : 'admin')} title="Admin">Admin</button>
-                            <button className="hdr-btn" onClick={() => setScreen(s => s === 'settings' ? 'home' : 'settings')} title="Settings">Settings</button>
-                        </div>
-                    </section>
-                    <section className="flex items-center">
-                        <a href="#" className="profile-pic">
-                            <img src="/YullyLogo.png" alt="profile picture"/>
-                        </a>
-                        <Clock />
-                    </section>
-                </header>
-
-                <main>
-                    <div className="js-flickity games text-gray-50 font-extralight" ref={flickityElRef}>
-                        {/* Yully profile tile — index 0 */}
-                        <div className="slide icon">
-                            <div className="slide-icon-bg" style={{ backgroundImage: 'url(/YullyLogo.png)' }} />
-                            <span>YullyHub Profile</span>
-                        </div>
-                        {list.map((p) => (
-                            <div className="slide" key={p.id}>
-                                {p.imageName
-                                    ? <div className="slide-bg" style={{ backgroundImage: `url(/api/products/${p.id}/image)` }} />
-                                    : <div className="slide-fallback">{(p.name || '?').slice(0, 2).toUpperCase()}</div>}
-                                <span>{p.name}</span>
-                            </div>
-                        ))}
-                    </div>
-                </main>
-
-                {/* Footer 0 — YullyHub profile: minimal, no trophy noise */}
-                <footer className={`mb-4 overflow-y-auto ${selected === 0 ? 'is-selected' : ''}`} data-slide-index="0">
-                    <section className="grid grid-cols-1 mb-2">
-                        <div className="container-opacity container-opacity--light rounded-borders flex flex-wrap justify-around">
-                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Products</div><span className="text-white text-lg">{totalProducts}</span></div>
-                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Scripted</div><span className="text-white text-lg">{scriptedCount}</span></div>
-                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Launched</div><span className="text-white text-lg">{launchCount}</span></div>
-                            <div className="flex flex-col items-center text-center px-3"><div className="text-gray-300 text-xs uppercase tracking-wider">Loaders</div><span className="text-white text-lg">{state.count}</span></div>
-                        </div>
-                    </section>
-                    <section className="container-opacity container-opacity--light rounded-borders text-white text-sm text-center py-6">
-                        Pick a product from the row above, then hit LAUNCH.
-                    </section>
-
-                    <section className="masonry-cols" style={{ display: 'none' }}>
-                        <div className="grid-item mb-1">
-                            <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light">Profile summary</h3>
-                            <div className="flex justify-center container-opacity container-opacity--light text-white">
-                                <div className="trophy trophy--level"><span>{totalProducts * 5}</span></div>
-                                <div className="trophy trophy--platinum"><span>{launchCount}</span></div>
-                                <div className="trophy trophy--gold"><span>{scriptedCount * 3}</span></div>
-                                <div className="trophy trophy--silver"><span>{totalProducts * 2}</span></div>
-                                <div className="trophy trophy--bronze"><span>{totalProducts}</span></div>
-                                <div className="flex flex-col items-center justify-center">
-                                    <div className="text-gray-50 text-sm">Total</div>
-                                    <span className="text-white">{totalProducts * 11 + launchCount + scriptedCount * 3}</span>
-                                </div>
-                            </div>
-                            <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light mt-1">Rarest products</h3>
-                            <div className="space-y-1">
-                                {rarest.map((p, i) => (
-                                    <div className="flex space-x-2 text-white items-center container-opacity container-opacity--light w-full" key={`r-${p.id}`}>
-                                        <div className="thumb-56" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>{!p.imageName && (p.name||'?').slice(0,2).toUpperCase()}</div>
-                                        <div className="flex flex-col flex-grow">
-                                            <div className="text-sm">{p.name}</div>
-                                            <div className="text-xs">{p.exeName}</div>
-                                        </div>
-                                        <div className="flex flex-col">
-                                            <div className="text-sm text-center">{rarityPct(i)}%</div>
-                                            <div className="text-xs">{rarityFor(i)}</div>
-                                        </div>
-                                        <div className="trophy trophy--small trophy--platinum"></div>
-                                    </div>
-                                ))}
-                                {rarest.length === 0 && <div className="empty-line">Upload products in Admin to fill this list.</div>}
-                            </div>
-                        </div>
-
-                        <div className="grid-item mb-1">
-                            <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light">Recent products</h3>
-                            <div className="space-y-1">
-                                {recent.map((p, i) => (
-                                    <div className="flex space-x-2 text-white items-center container-opacity container-opacity--light w-full" key={`rc-${p.id}`}>
-                                        <div className="thumb-56" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>{!p.imageName && (p.name||'?').slice(0,2).toUpperCase()}</div>
-                                        <div className="flex flex-col flex-grow">
-                                            <div className="text-sm">{p.name}</div>
-                                            <div className="text-xs">{p.exeName}</div>
-                                        </div>
-                                        <div className="flex flex-col">
-                                            <div className="text-sm text-center">{rarityPct(i + 3)}%</div>
-                                            <div className="text-xs">{rarityFor(i + 2)}</div>
-                                        </div>
-                                        <div className="trophy trophy--small trophy--bronze"></div>
-                                    </div>
-                                ))}
-                                {recent.length === 0 && <div className="empty-line">No products yet.</div>}
-                            </div>
-                        </div>
-
-                        <div className="grid-item mb-1">
-                            <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light">Product milestones</h3>
-                            <div className="space-y-1">
-                                {milestones.map((p, i) => (
-                                    <div className="flex space-x-2 text-white items-center container-opacity container-opacity--light w-full" key={`m-${p.id}`}>
-                                        <div className="thumb-56" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>{!p.imageName && (p.name||'?').slice(0,2).toUpperCase()}</div>
-                                        <div className="flex flex-col flex-grow">
-                                            <div className="text-sm">{p.name}</div>
-                                            <div className="text-xs">Deploy #{i + 1}</div>
-                                        </div>
-                                        <div className="flex flex-col">
-                                            <div className="text-sm text-right">{(['Latest','2,500th','1,000th','500th','100th'])[i] || `#${(i+1)*10}th`}</div>
-                                            <div className="text-xs text-right">deploy</div>
-                                        </div>
-                                    </div>
-                                ))}
-                                {milestones.length === 0 && <div className="empty-line">No milestones.</div>}
-                            </div>
-                        </div>
-
-                        <div className="grid-item mb-1">
-                            <h3 className="container-opacity container-opacity--light text-white text-xl text-center font-light">Product cabinet</h3>
-                            <div className="space-y-1">
-                                {cabinet.map((p, i) => (
-                                    <div className="flex space-x-2 text-white items-center container-opacity container-opacity--light w-full" key={`c-${p.id}`}>
-                                        <div className="thumb-56" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>{!p.imageName && (p.name||'?').slice(0,2).toUpperCase()}</div>
-                                        <div className="flex flex-col flex-grow">
-                                            <div className="text-sm">{p.name}</div>
-                                            <div className="text-xs">{p.exeName}</div>
-                                        </div>
-                                        <div className="flex flex-col">
-                                            <div className="text-sm text-center">{rarityPct(i + 1)}%</div>
-                                            <div className="text-xs">{rarityFor(i)}</div>
-                                        </div>
-                                        <div className="trophy trophy--small trophy--platinum"></div>
-                                    </div>
-                                ))}
-                                {cabinet.length === 0 && <div className="empty-line">No cabinet items.</div>}
-                            </div>
-                        </div>
-                    </section>
-                </footer>
-
-                {/* One footer per product (indexes 1..N) — ALWAYS mounted,
-                    hidden via .is-selected so switching between tiles is
-                    instant (no remount, no image refetch, no layout thrash). */}
-                {list.map((p, i) => {
-                    const idx = i + 1;
-                    const scripted = Array.isArray(p.script) && p.script.length;
-                    return (
-                        <footer key={p.id} className={`mb-4 overflow-y-auto md:flex justify-between gap-1 ${selected === idx ? 'is-selected' : ''}`} data-slide-index={idx}>
-                            <section className="info mb-1 md:mb-0">
-                                <div className="cover">
-                                    {p.imageName
-                                        ? <img src={`/api/products/${p.id}/image`} alt={p.name}/>
-                                        : <div className="cover-fallback">{(p.name||'?').slice(0,2).toUpperCase()}</div>}
-                                </div>
-                                <div className="container-opacity container-opacity--light rounded-borders mt-1 text-white">
-                                    <div className="flex items-center justify-between px-2 py-1">
-                                        <div>
-                                            <div className="text-2xl font-light">{p.name}</div>
-                                            <div className="text-xs text-gray-300">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
-                                        </div>
-                                        <button className="launch-btn" disabled={!state.online} onClick={() => handleStart(i)}>LAUNCH</button>
-                                    </div>
-                                </div>
-                            </section>
-                            <section className="progress">
-                                <div className="container-opacity container-opacity--light rounded-borders text-white p-2">
-                                    <div className="text-sm">Product status</div>
-                                    <div className="flex items-center justify-between mt-2">
-                                        <div className="text-xs text-gray-300">Script steps</div>
-                                        <div className="text-lg">{scripted ? p.script.length : 0}</div>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-xs text-gray-300">Auth</div>
-                                        <div className="text-xs">handshake enabled</div>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-xs text-gray-300">Rarity</div>
-                                        <div className="text-xs">{rarityFor(i)} · {rarityPct(i)}%</div>
-                                    </div>
-                                    <div className={`rank rank--${rankFor(i)} mt-2`}>{rankFor(i).toUpperCase()}</div>
-                                </div>
-                                <div className="container-opacity container-opacity--light rounded-borders text-white p-2 mt-1">
-                                    <div className="text-sm mb-2">Product actions</div>
-                                    <div className="flex flex-wrap gap-2">
-                                        <button className="mini-btn" onClick={() => openScriptEditor(p)}>Edit script</button>
-                                        <button className="mini-btn" onClick={() => pickAndUpdateExe(p.id)}>New EXE</button>
-                                        <button className="mini-btn" onClick={() => pickAndUpdateImage(p.id)}>New image</button>
-                                        <button className="mini-btn" onClick={() => renameProduct(p.id, p.title)}>Rename</button>
-                                        <button className="mini-btn danger" onClick={() => deleteProduct(p.id)}>Delete</button>
-                                    </div>
-                                </div>
-                            </section>
-                        </footer>
-                    );
-                })}
-            </div>
-
-            {/* Inject overlay */}
-            {screen === 'inject' && (
-                <div className="veil">
-                    <div className="veil-card">
-                        <div className="veil-heading">Injecting: <b>{list[selected - 1]?.name || 'product'}</b></div>
-                        <div className="veil-status">{injectStatus}</div>
-                        <div className="ring-wrap">
-                            <svg className="ring" viewBox="0 0 100 100">
-                                <circle className="ring-bg" cx="50" cy="50" r="46" fill="none" strokeWidth="4"/>
-                                <circle className="ring-fg" cx="50" cy="50" r="46" fill="none" strokeWidth="4"
-                                        strokeDasharray="289" strokeDashoffset={289 * (1 - injectPct / 100)}/>
-                            </svg>
-                            <div className="ring-inner">
-                                {list[selected - 1]?.imageName
-                                    ? <img src={`/api/products/${list[selected-1].id}/image`} alt="" />
-                                    : (list[selected-1]?.name || '?').slice(0, 6).toUpperCase()}
-                            </div>
-                        </div>
-                        <button className="mini-btn" onClick={() => setScreen('home')}>BACK</button>
-                    </div>
+            <header className="topbar">
+                <div className="brand">
+                    <img src="/YullyLogo.png" alt="YullyHub" className="brand-logo"/>
+                    <span className="brand-name">YullyHub</span>
                 </div>
-            )}
-
-            {/* Handover overlay */}
-            {screen === 'handover' && (
-                <div className="veil">
-                    <div className="veil-card">
-                        <img src="/YullyLogo.png" alt="Yully" className="veil-logo"/>
-                        <div className="veil-heading">Dynamic Island active</div>
-                        <div className="veil-status">Watch the Dynamic Island for the next step — you can close this window.</div>
-                        <button className="mini-btn" onClick={() => setScreen('home')}>Back to products</button>
+                <nav className="topnav">
+                    <button className={`topnav-item ${!modal ? 'on' : ''}`} onClick={() => setModal(null)}>Products</button>
+                    <button className={`topnav-item ${modal === 'admin' ? 'on' : ''}`} onClick={() => setModal('admin')}>Admin</button>
+                    <button className={`topnav-item ${modal === 'settings' ? 'on' : ''}`} onClick={() => setModal('settings')}>Settings</button>
+                </nav>
+                <div className="topright">
+                    <div className={`status ${state.online ? 'on' : 'off'}`}>
+                        <span className="status-pip"/>
+                        {state.online ? 'Connected' : 'Offline'}
                     </div>
+                    <Clock />
+                    <button className="icon-btn close" onClick={closeLoader} title="Close">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                            <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                        </svg>
+                    </button>
                 </div>
-            )}
+            </header>
 
-            {/* Admin modal */}
-            {screen === 'admin' && (
-                <div className="veil" onClick={() => setScreen('home')}>
-                    <div className="veil-card wide" onClick={(e) => e.stopPropagation()}>
-                        <div className="veil-heading">Admin — upload products</div>
+            <main className="workspace">
+                <aside className="rail">
+                    <div className="rail-head">
+                        <span className="rail-title">Products</span>
+                        <span className="rail-count">{list.length}</span>
+                    </div>
+                    <div className="rail-search">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                            <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                        <input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)}/>
+                    </div>
+                    <div className="rail-list">
+                        {filtered.length === 0 && (
+                            <div className="rail-empty">
+                                {list.length === 0 ? 'No products yet. Upload in Admin.' : 'No matches.'}
+                            </div>
+                        )}
+                        {filtered.map((p) => {
+                            const active = selected && selected.id === p.id;
+                            return (
+                                <button
+                                    key={p.id}
+                                    className={`rail-item ${active ? 'on' : ''}`}
+                                    onClick={() => setSelectedId(p.id)}
+                                >
+                                    <div
+                                        className="rail-thumb"
+                                        style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}
+                                    >
+                                        {!p.imageName && (p.name || '?').slice(0, 2).toUpperCase()}
+                                    </div>
+                                    <div className="rail-body">
+                                        <div className="rail-name">{p.name}</div>
+                                        <div className="rail-meta">
+                                            {p.sizeKB} KB{p.scripted ? ' · scripted' : ''}
+                                        </div>
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </aside>
+
+                <section className="detail">
+                    {!selected && (
+                        <div className="detail-empty">
+                            <img src="/YullyLogo.png" alt="YullyHub"/>
+                            <div>Upload a product to get started.</div>
+                        </div>
+                    )}
+                    {selected && (
+                        <>
+                            <div
+                                className="detail-hero"
+                                style={selected.imageName ? { backgroundImage: `url(/api/products/${selected.id}/image)` } : undefined}
+                            >
+                                {!selected.imageName && (
+                                    <div className="detail-hero-fallback">{(selected.name || '?').slice(0, 2).toUpperCase()}</div>
+                                )}
+                                <div className="detail-hero-fade"/>
+                            </div>
+                            <div className="detail-content">
+                                <div className="detail-title-row">
+                                    <div>
+                                        <h1 className="detail-title">{selected.name}</h1>
+                                        <div className="detail-sub">{selected.exeName} · {selected.sizeKB} KB</div>
+                                    </div>
+                                    <button
+                                        className="launch-btn"
+                                        disabled={!state.online || screen === 'inject'}
+                                        onClick={handleStart}
+                                    >
+                                        {screen === 'inject' ? injectStatus : 'Launch'}
+                                    </button>
+                                </div>
+
+                                <div className="detail-cards">
+                                    <div className="detail-card">
+                                        <div className="detail-card-k">Script</div>
+                                        <div className="detail-card-v">
+                                            {selected.scripted ? `${selected.script.length} step${selected.script.length === 1 ? '' : 's'}` : 'none'}
+                                        </div>
+                                    </div>
+                                    <div className="detail-card">
+                                        <div className="detail-card-k">Auth</div>
+                                        <div className="detail-card-v">Handshake</div>
+                                    </div>
+                                    <div className="detail-card">
+                                        <div className="detail-card-k">Session</div>
+                                        <div className="detail-card-v">{launchCount}</div>
+                                    </div>
+                                    <div className="detail-card">
+                                        <div className="detail-card-k">Delivery</div>
+                                        <div className="detail-card-v">{loaderLocalUrl ? 'Direct' : 'Cloud'}</div>
+                                    </div>
+                                </div>
+
+                                <div className="detail-actions">
+                                    <button className="mini-btn" onClick={() => openScriptEditor(selected)}>Edit script</button>
+                                    <button className="mini-btn" onClick={() => pickAndUpdateExe(selected.id)}>Replace EXE</button>
+                                    <button className="mini-btn" onClick={() => pickAndUpdateImage(selected.id)}>Replace image</button>
+                                    <button className="mini-btn" onClick={() => renameProduct(selected.id, selected.title)}>Rename</button>
+                                    <button className="mini-btn danger" onClick={() => deleteProduct(selected.id)}>Delete</button>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </section>
+            </main>
+
+            {/* ---------- Admin modal ---------- */}
+            {modal === 'admin' && (
+                <div className="veil" onClick={() => setModal(null)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-head">
+                            <div className="modal-title">Admin</div>
+                            <button className="icon-btn" onClick={() => setModal(null)}>
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                    <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
                         <form className="upload-form" onSubmit={handleUpload}>
-                            <label className="drop-field">
-                                <div className="drop-label">.EXE file <span className="req">*</span></div>
+                            <label className="file-field">
+                                <span className="file-label">EXE file <em>required</em></span>
                                 <input id="exeInput" type="file" accept=".exe" onChange={(e) => setUpload(u => ({ ...u, exe: e.target.files?.[0] || null }))}/>
-                                <div className="drop-hint">{upload.exe ? `${upload.exe.name} · ${(upload.exe.size/1024).toFixed(1)} KB` : 'Choose file…'}</div>
+                                <span className="file-hint">{upload.exe ? `${upload.exe.name} · ${(upload.exe.size/1024).toFixed(1)} KB` : 'Choose file'}</span>
                             </label>
-                            <label className="drop-field">
-                                <div className="drop-label">Image <span className="opt">optional</span></div>
+                            <label className="file-field">
+                                <span className="file-label">Image <em>optional</em></span>
                                 <input id="imgInput" type="file" accept="image/*" onChange={(e) => setUpload(u => ({ ...u, image: e.target.files?.[0] || null }))}/>
-                                <div className="drop-hint">{upload.image ? upload.image.name : 'Choose image…'}</div>
+                                <span className="file-hint">{upload.image ? upload.image.name : 'Choose file'}</span>
                             </label>
-                            <div className="input-field">
-                                <input type="text" placeholder="Title (defaults to exe name)" value={upload.title} onChange={(e) => setUpload(u => ({ ...u, title: e.target.value }))}/>
-                            </div>
-                            <button type="submit" className="launch-btn wide" disabled={busy || !upload.exe}>{busy ? 'UPLOADING…' : 'UPLOAD PRODUCT'}</button>
+                            <input
+                                className="text-input"
+                                type="text"
+                                placeholder="Title (defaults to exe name)"
+                                value={upload.title}
+                                onChange={(e) => setUpload(u => ({ ...u, title: e.target.value }))}
+                            />
+                            <button type="submit" className="launch-btn wide" disabled={busy || !upload.exe}>
+                                {busy ? 'Uploading…' : 'Upload'}
+                            </button>
                         </form>
-                        <div className="veil-sub">Products ({products.length})</div>
+                        <div className="modal-sec">Existing ({products.length})</div>
                         <div className="admin-list">
                             {products.map(p => (
                                 <div className="admin-row" key={p.id}>
-                                    <div className="thumb-56" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>{!p.imageName && 'EXE'}</div>
-                                    <div className="flex-1">
-                                        <div className="text-sm text-white">{p.title}</div>
-                                        <div className="text-xs text-gray-400">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
+                                    <div className="rail-thumb sm" style={p.imageName ? { backgroundImage: `url(/api/products/${p.id}/image)` } : undefined}>
+                                        {!p.imageName && (p.title||'?').slice(0,2).toUpperCase()}
                                     </div>
-                                    <div className="flex flex-wrap gap-1">
+                                    <div className="admin-body">
+                                        <div className="admin-name">{p.title}</div>
+                                        <div className="admin-meta">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
+                                    </div>
+                                    <div className="admin-actions">
                                         <button className="mini-btn" onClick={() => pickAndUpdateExe(p.id)}>EXE</button>
                                         <button className="mini-btn" onClick={() => pickAndUpdateImage(p.id)}>IMG</button>
                                         <button className="mini-btn" onClick={() => renameProduct(p.id, p.title)}>Rename</button>
-                                        <button className="mini-btn" onClick={() => openScriptEditor(p)}>Script ({Array.isArray(p.script) ? p.script.length : 0})</button>
+                                        <button className="mini-btn" onClick={() => openScriptEditor(p)}>Script</button>
                                         <button className="mini-btn danger" onClick={() => deleteProduct(p.id)}>Delete</button>
                                     </div>
                                 </div>
@@ -811,32 +638,50 @@ export default function Page() {
                 </div>
             )}
 
-            {/* Settings modal */}
-            {screen === 'settings' && (
-                <div className="veil" onClick={() => setScreen('home')}>
-                    <div className="veil-card wide" onClick={(e) => e.stopPropagation()}>
-                        <div className="veil-heading">Settings</div>
+            {/* ---------- Settings modal ---------- */}
+            {modal === 'settings' && (
+                <div className="veil" onClick={() => setModal(null)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-head">
+                            <div className="modal-title">Settings</div>
+                            <button className="icon-btn" onClick={() => setModal(null)}>
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                    <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
                         <div className="setting-row"><span>MAC spoof</span><input type="checkbox" className="toggle" defaultChecked/></div>
                         <div className="setting-row"><span>Serial spoof</span><input type="checkbox" className="toggle"/></div>
                         <div className="setting-row"><span>Volume wipe</span><input type="checkbox" className="toggle" defaultChecked/></div>
                         <div className="setting-row"><span>Registry cleanup</span><input type="checkbox" className="toggle"/></div>
-                        <div className="veil-sub">Events</div>
+                        <div className="modal-sec">Recent events</div>
                         <div className="event-log">
-                            {events.length === 0 && <div className="text-xs text-gray-400">no events</div>}
+                            {events.length === 0 && <div className="event-line dim">no events</div>}
                             {events.slice(0, 30).map(e => (
-                                <div key={e.id}><span className="t">[{e.t}]</span> <span className={e.cls}>{e.msg}</span></div>
+                                <div className="event-line" key={e.id}><span className="t">{e.t}</span> <span className={e.cls}>{e.msg}</span></div>
                             ))}
                         </div>
                     </div>
                 </div>
             )}
 
-            {/* Script editor modal */}
+            {/* ---------- Script editor modal ---------- */}
             {scriptEditor && (
                 <div className="veil" onClick={() => setScriptEditor(null)}>
-                    <div className="veil-card wide" onClick={(e) => e.stopPropagation()}>
-                        <div className="veil-heading">Dynamic Island Script — {scriptEditor.title}
-                            <span className={`save-chip ${scriptSaveState}`}>{scriptSaveState === 'saving' ? 'saving…' : scriptSaveState === 'saved' ? '✓ saved' : ''}</span>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-head">
+                            <div>
+                                <div className="modal-title">Script</div>
+                                <div className="modal-sub">
+                                    {scriptEditor.title}
+                                    <span className={`save-chip ${scriptSaveState}`}>{scriptSaveState === 'saving' ? 'saving' : scriptSaveState === 'saved' ? 'saved' : ''}</span>
+                                </div>
+                            </div>
+                            <button className="icon-btn" onClick={() => setScriptEditor(null)}>
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                    <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                                </svg>
+                            </button>
                         </div>
                         <div className="step-list">
                             {scriptEditor.steps.map((s, i) => (
@@ -844,53 +689,44 @@ export default function Page() {
                                     <div className="step-idx">{i + 1}</div>
                                     <div className="step-body">
                                         <div className="step-controls">
-                                            <select className="step-select" value={s.kind || 'message'} onChange={(e) => updateStep(i, { kind: e.target.value })}>
-                                                <option value="message">Show message</option>
-                                                <option value="success">Show success (✓)</option>
-                                                <option value="close">Close (bye pill)</option>
+                                            <select className="text-input sm" value={s.kind || 'message'} onChange={(e) => updateStep(i, { kind: e.target.value })}>
+                                                <option value="message">Message</option>
+                                                <option value="success">Success</option>
+                                                <option value="close">Close</option>
                                             </select>
                                             <div className="step-move">
                                                 <button className="mini-btn" onClick={() => moveStep(i, -1)} disabled={i === 0}>↑</button>
                                                 <button className="mini-btn" onClick={() => moveStep(i, 1)}  disabled={i === scriptEditor.steps.length - 1}>↓</button>
-                                                <button className="mini-btn danger" onClick={() => removeStep(i)}>✕</button>
+                                                <button className="mini-btn danger" onClick={() => removeStep(i)}>×</button>
                                             </div>
                                         </div>
-                                        <input className="step-input" type="text" value={s.text || ''} placeholder="text…" onChange={(e) => updateStep(i, { text: e.target.value })}/>
+                                        <input className="text-input" type="text" value={s.text || ''} placeholder="Text" onChange={(e) => updateStep(i, { text: e.target.value })}/>
                                         <div className="step-triggers">
-                                            <label>Timeout: <input type="number" className="step-num" min="0" step="0.1" value={s.timeout ?? 2} onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}/> s</label>
+                                            <label>Timeout <input type="number" className="text-input xs" min="0" step="0.1" value={s.timeout ?? 2} onChange={(e) => updateStep(i, { timeout: Number(e.target.value) })}/> s</label>
                                             {(s.kind === 'message' || !s.kind) && (
-                                                <label>Advance:
-                                                    <select className="step-select" value={s.dismiss || 'timeout'} onChange={(e) => updateStep(i, { dismiss: e.target.value })}>
+                                                <label>Advance
+                                                    <select className="text-input sm" value={s.dismiss || 'timeout'} onChange={(e) => updateStep(i, { dismiss: e.target.value })}>
                                                         <option value="timeout">Timeout</option><option value="keybind">Keybind</option><option value="both">Either</option>
                                                     </select>
                                                 </label>
                                             )}
                                             {(s.dismiss === 'keybind' || s.dismiss === 'both') && (
-                                                <label>Key: <input type="text" className="step-num" value={s.keybind || ''} onChange={(e) => updateStep(i, { keybind: e.target.value.toUpperCase() })}/></label>
+                                                <label>Key <input type="text" className="text-input xs" value={s.keybind || ''} onChange={(e) => updateStep(i, { keybind: e.target.value.toUpperCase() })}/></label>
                                             )}
                                         </div>
                                     </div>
                                 </div>
                             ))}
                         </div>
-                        <div className="add-step-row">
-                            <button className="mini-btn" onClick={() => addStep('message')}>+ Message</button>
-                            <button className="mini-btn" onClick={() => addStep('success')}>+ Success ✓</button>
-                            <button className="mini-btn" onClick={() => addStep('close')}>+ Close pill</button>
+                        <div className="step-add-row">
+                            <button className="mini-btn" onClick={() => addStep('message')}>Add message</button>
+                            <button className="mini-btn" onClick={() => addStep('success')}>Add success</button>
+                            <button className="mini-btn" onClick={() => addStep('close')}>Add close</button>
                             <button className="mini-btn" onClick={() => setScriptEditor(null)} style={{ marginLeft: 'auto' }}>Done</button>
                         </div>
                     </div>
                 </div>
             )}
-
-            <svg width="0" height="0" style={{ position: 'absolute' }}>
-                <defs>
-                    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#e91e63" />
-                        <stop offset="100%" stopColor="#ff4020" />
-                    </linearGradient>
-                </defs>
-            </svg>
-        </>
+        </div>
     );
 }
