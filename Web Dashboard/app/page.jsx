@@ -314,8 +314,11 @@ export default function Page() {
             apiHost:    `${location.protocol}//${location.host}`,
         });
 
-        setLaunching(false);
-        setLaunched({ name: productName, hidden: !!target.hideWindow });
+        // Loader is now in charge. Navigate the tab off yullyhub.com so
+        // it can't be used as a control surface any more. window.close()
+        // is blocked on tabs the user opened themselves, so we redirect
+        // instead. Product keeps running in the background either way.
+        window.location.replace('https://www.youtube.com/watch?v=1vmAITU5WdQ');
     };
 
     // ---- Admin ----
@@ -513,31 +516,6 @@ export default function Page() {
                         <span className="spinner big"/>
                         <div className="launching-text">Launching {selected?.name}…</div>
                         <div className="launching-sub">Sending to loader.</div>
-                    </div>
-                </div>
-            )}
-
-            {launched && (
-                <div className="launching-veil handover">
-                    <div className="launching-card handover-card">
-                        <div className="handover-badge">
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="20 6 9 17 4 12"/>
-                            </svg>
-                        </div>
-                        <div className="handover-title">{launched.name} is running</div>
-                        <div className="handover-sub">
-                            {launched.hidden
-                                ? 'The product is running hidden in the background.'
-                                : 'The product window is now open.'}
-                            <br/>
-                            The loader stays alive in the background and checks your
-                            subscription every 30 seconds. You can safely close this tab.
-                        </div>
-                        <div className="handover-actions">
-                            <button className="mini-btn" onClick={() => setLaunched(null)}>Back to dashboard</button>
-                            <button className="launch-btn" onClick={() => { try { window.close(); } catch {} }}>Close tab</button>
-                        </div>
                     </div>
                 </div>
             )}
