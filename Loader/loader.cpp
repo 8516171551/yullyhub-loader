@@ -1487,11 +1487,22 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrlType) {
      OPTIONS *       → 204 with CORS headers for preflight
    ========================================================================== */
 
+// Chrome's Private Network Access (aka LNA) blocks requests from public
+// origins (https://yullyhub.com) to private IPs (127.0.0.1) by default
+// starting Chrome 117. The target MUST reply with:
+//   - Access-Control-Allow-Origin: <exact origin> (NOT *)
+//   - Access-Control-Allow-Private-Network: true
+// Otherwise Chrome fails the preflight without even prompting the user.
+// With these headers present, Chrome shows ONE permission dialog per
+// origin per profile, then remembers "allow".
 static const char* kCORSHeaders =
-    "Access-Control-Allow-Origin: *\r\n"
+    "Access-Control-Allow-Origin: https://yullyhub.com\r\n"
+    "Access-Control-Allow-Credentials: true\r\n"
     "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n"
-    "Access-Control-Allow-Headers: *\r\n"
-    "Access-Control-Max-Age: 86400\r\n";
+    "Access-Control-Allow-Headers: content-type\r\n"
+    "Access-Control-Allow-Private-Network: true\r\n"
+    "Access-Control-Max-Age: 86400\r\n"
+    "Vary: Origin\r\n";
 
 static void send_http(SOCKET s, int code, const char* status, const std::string& body,
                       const char* contentType = "text/plain") {

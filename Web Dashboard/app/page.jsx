@@ -33,7 +33,21 @@ function LandingPage({ session, checking }) {
 // --------------------------------------------------------------------------
 // IslandPill — in-browser Dynamic Island
 // --------------------------------------------------------------------------
-function IslandPill({ script, onFinish }) {
+// Prepend a loading step to any script that doesn't start with one.
+// Loading is the "injecting…" spinner phase the user sees immediately
+// after clicking Launch.
+function withLoadingStep(script) {
+    if (!script || !Array.isArray(script.steps) || !script.steps.length) return script;
+    const first = script.steps[0];
+    if (first.kind === 'loading') return script;
+    return {
+        ...script,
+        steps: [{ kind: 'loading', text: 'Injecting', timeout: 2.4 }, ...script.steps],
+    };
+}
+
+function IslandPill({ script: rawScript, onFinish }) {
+    const script = useMemo(() => withLoadingStep(rawScript), [rawScript]);
     const [idx, setIdx] = useState(0);
     const [gen, setGen] = useState(0);
     useEffect(() => {
@@ -74,9 +88,22 @@ function IslandPill({ script, onFinish }) {
     const step = script.steps[idx];
     if (!step) return null;
     const kind = step.kind || 'message';
+    // Non-loading steps ARE clickable to advance; loading step blocks clicks.
+    const clickable = kind !== 'loading';
     return (
         <div className={`island-wrap island-${kind}`}>
-            <div className="island-pill" onClick={() => setIdx((i) => i + 1)}>
+            {/* key on step index → re-mount → CSS keyframe fires per step,
+                giving the iOS-style content pop/settle on every advance. */}
+            <div
+                key={idx}
+                className="island-pill"
+                onClick={() => { if (clickable) setIdx((i) => i + 1); }}
+            >
+                {kind === 'loading' && (
+                    <span className="island-loader" aria-hidden="true">
+                        <span className="dot"/><span className="dot"/><span className="dot"/>
+                    </span>
+                )}
                 {kind === 'success' && (
                     <span className="island-check">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -143,6 +170,7 @@ export default function Page() {
     // Sticky online tracking (see command-queue.js for the server-side story)
     const lastOnlineAtRef = useRef(0);
     const [loaderLocalUrl, setLoaderLocalUrl] = useState(null);
+    const [lnaState, setLnaState] = useState('unknown'); // 'unknown' | 'prompt' | 'granted' | 'denied'
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const url = new URL(window.location.href);
@@ -204,6 +232,35 @@ export default function Page() {
             setProducts(j.products || []);
         } catch {}
     }, []);
+
+    // Fire the Local Network Access preflight on the very first frame the
+    // loader URL is known. Chrome will show its "allow local network access"
+    // dialog immediately, blocking behind our own modal so the user is
+    // primed to click Allow.
+    useEffect(() => {
+        if (!loaderLocalUrl) return;
+        setLnaState('prompt');
+        const ping = async () => {
+            try {
+                // no-cors + POST body triggers the LNA preflight the same way
+                // an actual /command call would, but the browser lets us
+                // read status via no-cors's opaque success.
+                const r = await fetch(loaderLocalUrl.replace(/\/$/, '') + '/ping', {
+                    method: 'GET', mode: 'cors', credentials: 'omit',
+                });
+                if (r.ok) { setLnaState('granted'); return true; }
+                setLnaState('denied');
+                return false;
+            } catch (e) {
+                setLnaState('denied');
+                return false;
+            }
+        };
+        // Small delay so our own modal renders first, then Chrome's prompt
+        // stacks on top with our explanation visible behind it.
+        const t = setTimeout(ping, 120);
+        return () => clearTimeout(t);
+    }, [loaderLocalUrl]);
 
     useEffect(() => {
         loadProducts();
@@ -282,46 +339,55 @@ export default function Page() {
         if (selectedId && !list.find(p => p.id === selectedId) && list.length > 0) setSelectedId(list[0].id);
     }, [list, selectedId]);
 
-    // ---- Launch flow (unchanged logic) ----
+    // ---- Launch flow ----
+    // Island opens IMMEDIATELY (with an auto-prepended loading step) so the
+    // customer sees the injecting-spinner as soon as they click Launch.
+    // The dashboard hides itself under CSS the moment islandScript is set.
     const handleStart = async () => {
         if (!selected) return;
         const target = selected;
-        setScreen('inject');
-        setInjectPct(0);
-        setInjectStatus('Processing…');
         setLaunchCount((c) => c + 1);
         const productName = target.name || target.title || 'product';
 
+        // Fetch the latest script + auth token in parallel with kicking off
+        // the loader command. We show the island with a loading step first
+        // and swap in the real script once it lands (usually <100ms).
+        setIslandScript({
+            product: productName,
+            steps: [{ kind: 'loading', text: `Injecting ${productName}`, timeout: 60 }],
+        });
+
         const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
-        let token = null;
-        try {
-            const r = await fetch('/api/auth/exchange', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
-            });
-            if (r.ok) { const j = await r.json(); token = j.token; pushEvent(`auth: token ${token.slice(0,8)}…`, 'ok'); }
-        } catch {}
-        sendCommand({ type: 'launch', productId: target.id, title: target.title, url, token, apiHost: `${location.protocol}//${location.host}` });
+        const [tokenRes, scriptRes] = await Promise.all([
+            (async () => {
+                try {
+                    const r = await fetch('/api/auth/exchange', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
+                    });
+                    if (r.ok) { const j = await r.json(); return j.token; }
+                } catch {}
+                return null;
+            })(),
+            (async () => {
+                let latest = Array.isArray(target.script) ? target.script : null;
+                try {
+                    const r = await fetch(`/api/products/${target.id}`);
+                    if (r.ok) { const fresh = await r.json(); if (Array.isArray(fresh.script)) latest = fresh.script; }
+                } catch {}
+                return latest;
+            })(),
+        ]);
+        if (tokenRes) pushEvent(`auth: token ${tokenRes.slice(0,8)}…`, 'ok');
 
-        let latestScript = Array.isArray(target.script) ? target.script : null;
-        try {
-            const r = await fetch(`/api/products/${target.id}`);
-            if (r.ok) { const fresh = await r.json(); if (Array.isArray(fresh.script)) latestScript = fresh.script; }
-        } catch {}
+        sendCommand({ type: 'launch', productId: target.id, title: target.title, url, token: tokenRes, apiHost: `${location.protocol}//${location.host}` });
 
-        let p = 0;
-        const iv = setInterval(() => {
-            p += 3 + Math.random() * 4;
-            if (p >= 100) {
-                p = 100; clearInterval(iv);
-                setInjectStatus('Complete');
-                setInjectPct(100);
-                const script = Array.isArray(latestScript) && latestScript.length ? latestScript :
-                    [{ kind: 'message', text: `${productName} loaded`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
-                islandSend({ type: 'island', action: 'script', product: productName, steps: script });
-                setTimeout(() => { setScreen('home'); }, 500);
-            } else setInjectPct(p);
-        }, 90);
+        const scriptSteps = Array.isArray(scriptRes) && scriptRes.length ? scriptRes :
+            [{ kind: 'message', text: `${productName} loaded`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
+        // Replace the placeholder loading step's script with the real one —
+        // withLoadingStep() will re-prepend its own uniform loading step so
+        // the transition is: loading → user's real script steps.
+        setIslandScript({ product: productName, steps: scriptSteps });
     };
 
     // ---- Admin ----
@@ -471,19 +537,47 @@ export default function Page() {
         try { window.close(); } catch {}
     };
 
-    return (
-        <div className="ui">
-            {/* Inject progress hairline pinned to the very top edge */}
-            {screen === 'inject' && (
-                <div className="topbar-progress">
-                    <div className="topbar-progress-fill" style={{ width: `${injectPct}%` }}/>
-                </div>
-            )}
+    // Once the Dynamic Island opens the dashboard is gone — only the pill
+    // is on-screen. We hide the .ui shell entirely; body bg stays dark.
+    const islandActive = !!islandScript;
 
+    return (
+        <div className={`ui ${islandActive ? 'hidden' : ''}`}>
             <IslandPill script={islandScript} onFinish={async () => {
                 setIslandScript(null);
                 await closeLoader();
             }} />
+
+            {/* Local network access nag — shown at the very first frame
+                after we know the loader URL, forcing the user to click
+                Allow when Chrome pops its permission dialog. */}
+            {(lnaState === 'prompt' || lnaState === 'denied') && !islandActive && (
+                <div className="lna-veil">
+                    <div className="lna-card">
+                        <div className={`lna-icon ${lnaState}`}>
+                            {lnaState === 'denied'
+                                ? <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="8" x2="12" y2="13"/><circle cx="12" cy="17" r=".5" fill="currentColor"/><circle cx="12" cy="12" r="10"/></svg>
+                                : <span className="spinner big"/>}
+                        </div>
+                        <div className="lna-title">
+                            {lnaState === 'denied' ? 'Click Allow in Chrome' : 'Granting local access…'}
+                        </div>
+                        <div className="lna-body">
+                            {lnaState === 'denied'
+                                ? 'Chrome blocked the loader connection. Click Allow when the browser prompts, or try again below. Everything runs locally on your PC.'
+                                : 'Chrome is asking for permission to talk to the loader running on your PC. Click Allow.'}
+                        </div>
+                        <button className="launch-btn wide" onClick={async () => {
+                            setLnaState('prompt');
+                            try {
+                                const r = await fetch(loaderLocalUrl.replace(/\/$/, '') + '/ping', { method: 'GET', mode: 'cors' });
+                                if (r.ok) setLnaState('granted');
+                                else setLnaState('denied');
+                            } catch { setLnaState('denied'); }
+                        }}>{lnaState === 'denied' ? 'Try again' : 'Grant'}</button>
+                    </div>
+                </div>
+            )}
 
             <header className="topbar">
                 <div className="brand">
@@ -579,10 +673,10 @@ export default function Page() {
                                     </div>
                                     <button
                                         className="launch-btn"
-                                        disabled={!state.online || screen === 'inject'}
+                                        disabled={!state.online || islandActive}
                                         onClick={handleStart}
                                     >
-                                        {screen === 'inject' ? injectStatus : 'Launch'}
+                                        Launch
                                     </button>
                                 </div>
 
