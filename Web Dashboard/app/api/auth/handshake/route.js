@@ -1,10 +1,10 @@
 // POST /api/auth/handshake
 //
 // The landing page POSTs the license key the user typed in. We validate
-// against the shared `licenses` table (yully.wtf owns it, yullyhub reads
-// & minimally writes on-first-activation). On success we mint a session
-// row in yh_loader_sessions and return a token the loader will pass to
-// /api/auth/heartbeat on every 30s beat.
+// against the shared `licenses` table (yully.wtf owns writes, yullyhub
+// activates on first use). On success we mint a session row in
+// loader_sessions and return a token the loader passes to
+// /api/auth/heartbeat every ~30s.
 //
 // Request:  { key: "XXXX-XXXX-XXXX-XXXX", hwid?: "...", loaderId?: "..." }
 // Response: { ok: true, token, loaderId, tier, expires_at }
@@ -45,14 +45,14 @@ export async function POST(request) {
 
     const lic = await q1(
         `SELECT \`key\`, active, blacklisted_at, expires_at, activated_at,
-                duration_days, tier, hwid, ip_lock, max_devices
+                duration_days, tier, hwid, ip_lock, max_devices,
+                redeemed_by_user_id
          FROM licenses WHERE \`key\` = ?`,
         [key]
     );
     if (!lic) return fail('key_not_found', 404);
 
-    const now    = new Date();
-    const nowSec = Math.floor(now.getTime() / 1000);
+    const now = new Date();
 
     if (!lic.active)                                          return fail('key_inactive', 403);
     if (lic.blacklisted_at)                                   return fail('key_blacklisted', 403);
@@ -60,7 +60,7 @@ export async function POST(request) {
     if (lic.hwid && hwid && lic.hwid !== hwid)                return fail('hwid_locked', 403);
 
     // First-use activation: stamp activated_at + expires_at + hwid on the
-    // license row. This is the ONLY column yullyhub writes on licenses.
+    // license row.
     if (!lic.activated_at) {
         const expiresAt = lic.duration_days
             ? new Date(now.getTime() + lic.duration_days * 86400 * 1000)
@@ -83,15 +83,15 @@ export async function POST(request) {
 
     // Revoke prior live sessions for this key — one active session per key.
     await q(
-        `UPDATE yh_loader_sessions SET revoked_at = ?
+        `UPDATE loader_sessions SET revoked_at = ?
            WHERE license_key = ? AND revoked_at IS NULL`,
         [now, key]
     );
     await q(
-        `INSERT INTO yh_loader_sessions
-            (id, license_key, loader_id, session_token, ip, user_agent)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [sessionId, key, loaderId, sessionToken, ip, ua]
+        `INSERT INTO loader_sessions
+            (id, license_key, loader_id, session_token, user_id, ip, user_agent)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, key, loaderId, sessionToken, lic.redeemed_by_user_id || null, ip, ua]
     );
 
     return NextResponse.json({

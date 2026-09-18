@@ -1,6 +1,6 @@
 // GET /api/loader/status?id=<loaderId>
 //
-// Read-only check backed by yh_loader_sessions.last_seen_at — does NOT
+// Read-only check backed by loader_sessions.last_seen_at — does NOT
 // bump the timestamp so a chatty dashboard doesn't keep a dead loader
 // looking alive.
 
@@ -24,7 +24,7 @@ export async function GET(request) {
 
     const row = await q1(
         `SELECT UNIX_TIMESTAMP(MAX(last_seen_at)) AS last_seen
-           FROM yh_loader_sessions
+           FROM loader_sessions
           WHERE loader_id = ? AND revoked_at IS NULL`,
         [id]
     );

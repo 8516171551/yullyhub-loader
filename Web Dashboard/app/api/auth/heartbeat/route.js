@@ -7,7 +7,7 @@
 // Request:  { token, loaderId, productId }
 // Response: { valid: boolean, reason?: string, ttl_seconds: number }
 //
-// Validates BOTH the yh_loader_sessions row (not revoked) AND the parent
+// Validates BOTH the loader_sessions row (not revoked) AND the parent
 // licenses row (still active, not blacklisted, not expired). If either
 // says no, the loader dies.
 //
@@ -49,7 +49,7 @@ export async function POST(request) {
                     l.active     AS lic_active,
                     l.blacklisted_at,
                     l.expires_at
-             FROM yh_loader_sessions s
+             FROM loader_sessions s
              LEFT JOIN licenses l ON l.\`key\` = s.license_key
              WHERE s.session_token = ?`,
             [token]
@@ -61,15 +61,15 @@ export async function POST(request) {
 
     if (!row)                                                    return NO('session_not_found');
     if (row.revoked_at)                                          return NO('session_revoked');
-    if (!row.lic_active)                                         return NO('key_inactive');
+    if (row.license_key && !row.lic_active)                      return NO('key_inactive');
     if (row.blacklisted_at)                                      return NO('key_blacklisted');
     if (row.expires_at && new Date(row.expires_at) < new Date()) return NO('key_expired');
 
     // Touch last_seen_at + record active product (best-effort).
     try {
         await q(
-            `UPDATE yh_loader_sessions
-                SET last_seen_at = CURRENT_TIMESTAMP,
+            `UPDATE loader_sessions
+                SET last_seen_at   = CURRENT_TIMESTAMP,
                     active_product = COALESCE(?, active_product)
               WHERE session_token = ?`,
             [productId || null, token]

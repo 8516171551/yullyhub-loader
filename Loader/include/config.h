@@ -33,3 +33,8 @@ extern HANDLE      g_kill_switch_job;
 extern HANDLE      g_product_process;
 extern std::string g_active_token;
 extern std::string g_active_product_id;
+
+// Bearer token minted by /api/loader/handshake. Attached as
+// Authorization: Bearer <token> on EVERY outbound http:: call when
+// non-empty. Read from env YULLY_LOADER_TOKEN (or legacy YULLY_TOKEN).
+extern std::string g_bearer_token;

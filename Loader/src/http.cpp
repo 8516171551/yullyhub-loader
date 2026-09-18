@@ -44,9 +44,21 @@ bool request(const std::string& host, int port, bool https,
     DWORD bodyLen = body ? (DWORD)body->size() : 0;
     LPVOID bodyPtr = body && !body->empty() ? (LPVOID)body->data() : WINHTTP_NO_REQUEST_DATA;
 
-    BOOL ok = WinHttpSendRequest(req,
-        extraHeaders ? extraHeaders : WINHTTP_NO_ADDITIONAL_HEADERS,
-        extraHeaders ? -1L : 0,
+    // Assemble headers: caller's extras first, then Authorization if a
+    // bearer token is loaded. Kept in a widened std::wstring so its
+    // storage outlives the WinHttpSendRequest call.
+    std::wstring hdrs;
+    if (extraHeaders) hdrs.assign(extraHeaders);
+    if (!g_bearer_token.empty()) {
+        if (!hdrs.empty() && hdrs.size() >= 2 &&
+            hdrs.compare(hdrs.size() - 2, 2, L"\r\n") != 0) hdrs += L"\r\n";
+        hdrs += L"Authorization: Bearer " + widen(g_bearer_token) + L"\r\n";
+    }
+    const wchar_t* hdrPtr = hdrs.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS
+                                         : hdrs.c_str();
+    DWORD hdrLen = hdrs.empty() ? 0 : (DWORD)-1L;
+
+    BOOL ok = WinHttpSendRequest(req, hdrPtr, hdrLen,
         bodyPtr, bodyLen, bodyLen, 0);
     if (!ok) { WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session); return false; }
 

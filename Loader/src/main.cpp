@@ -16,6 +16,19 @@ std::string g_api_host;
 int         g_api_port  = cfg::DEFAULT_API_PORT;
 bool        g_api_https = cfg::DEFAULT_API_HTTPS;
 std::string g_loader_id;
+std::string g_bearer_token;
+
+// Read YULLY_LOADER_TOKEN (or legacy YULLY_TOKEN) into g_bearer_token.
+// Empty is fine — the server will 401 anonymous callers and the loader
+// will fall through its normal fail paths.
+static void configure_bearer_from_env() {
+    char buf[512];
+    DWORD n = GetEnvironmentVariableA("YULLY_LOADER_TOKEN", buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) {
+        n = GetEnvironmentVariableA("YULLY_TOKEN", buf, sizeof(buf));
+    }
+    if (n > 0 && n < sizeof(buf)) g_bearer_token.assign(buf, n);
+}
 
 // Pull YULLY_HOST env into g_api_*.
 static void configure_from_env() {
@@ -85,10 +98,13 @@ int main(int argc, char** argv) {
     control::install_kill_switch();
     control::install_console_ctrl_handler();
     configure_from_env();
+    configure_bearer_from_env();
     gen_loader_id();
     std::cout << "[main] id=" << g_loader_id.substr(0, 8)
               << " host=" << g_api_host << ":" << g_api_port
-              << (g_api_https ? " https" : " http") << std::endl;
+              << (g_api_https ? " https" : " http")
+              << " bearer=" << (g_bearer_token.empty() ? "no" : "yes")
+              << std::endl;
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {

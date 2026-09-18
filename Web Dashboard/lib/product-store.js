@@ -1,39 +1,31 @@
 // product-store.js — persistence for products.
 //
-// Primary backend: shared MySQL (`yh_products`) on the yully.wtf/yullyhub
-// VPS. Requires DATABASE_URL. See lib/db.js and _yullyhub_readme row in
-// the DB for the ownership boundary — yh_products is OURS, do not
-// touch tables owned by yully.wtf.
+// Backend: shared MySQL `products` table on the yully.wtf/yullyhub VPS.
+// Requires DATABASE_URL. See lib/db.js and the _readme row (id=1) in the
+// DB for ownership rules — `products` is shared, admin-managed on
+// yully.wtf, read here.
 //
-// Fallback: Upstash Redis, when DATABASE_URL isn't set (local dev). Same
-// API surface, so callers don't need to know which backend is live.
-//
-// Binary blobs (exe, image) always live in Vercel Blob at:
+// Binary blobs (exe, image) live in Vercel Blob at:
 //   products/<id>/app.exe
 //   products/<id>/image<.ext>
 // Blob is private; /api/products/<id>/{exe,image} presigns a fresh GET
 // URL on each request.
 
-import { Redis } from '@upstash/redis';
 import { put as blobPut, del as blobDel } from '@vercel/blob';
 import crypto from 'crypto';
-import { getPool, hasDb, q, q1 } from './db.js';
+import { q, q1, hasDb } from './db.js';
 
-const KV_URL   = process.env.KV_REST_API_URL   || process.env.UPSTASH_REDIS_REST_URL;
-const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-const redis    = (KV_URL && KV_TOKEN) ? new Redis({ url: KV_URL, token: KV_TOKEN }) : null;
-
-const IDS_KEY   = 'yh:products';
-const META_KEY  = (id) => `yh:product:${id}`;
 const BLOB_ROOT = (id) => `products/${id}`;
 
-const USE_DB = hasDb();
-
 export function newId() {
-    return crypto.randomBytes(6).toString('hex');
+    return crypto.randomUUID();
 }
 export function safeId(id) {
-    return /^[a-f0-9]{6,32}$/.test(id) ? id : null;
+    if (!id) return null;
+    // Accept UUIDs (new) and 12-hex legacy ids.
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return id.toLowerCase();
+    if (/^[a-f0-9]{6,32}$/i.test(id)) return id.toLowerCase();
+    return null;
 }
 
 // ---- Blob helpers ----
@@ -47,7 +39,7 @@ async function uploadExe(id, file) {
         allowOverwrite:    true,
         cacheControlMaxAge: 0,
     });
-    return { url: res.url, size: buf.length, name: file.name || 'app.exe' };
+    return { url: res.url, pathname: res.pathname, size: buf.length, name: file.name || 'app.exe' };
 }
 
 async function uploadImage(id, file) {
@@ -61,85 +53,173 @@ async function uploadImage(id, file) {
         allowOverwrite:    true,
         cacheControlMaxAge: 86400,
     });
-    return { url: res.url, name: `image${ext}`, mime: file.type || 'image/png' };
+    return { url: res.url, pathname: res.pathname, name: `image${ext}`, mime: file.type || 'image/png' };
 }
 
-// ---- Meta helpers (backend-aware) ----
+// ---- Row <-> meta shape mapping ----
+//
+// The new `products` table columns:
+//   id, slug, name, description, image_url, exe_pathname, exe_url,
+//   exe_size_bytes, hide_window, active, price_cents, launch_script (JSON),
+//   created_at, updated_at
+//
+// The legacy JS meta shape used by /app/page.jsx:
+//   { id, title, exeName, exeSize, exeUrl, exePathname,
+//     imageName, imageMime, imageUrl, imagePathname,
+//     hideWindow, script, createdAt, updatedAt }
+
+function basenameFromPathname(p) {
+    if (!p) return null;
+    const clean = String(p).split('?')[0];
+    const parts = clean.split('/');
+    return parts[parts.length - 1] || null;
+}
+
+function guessMimeFromName(n) {
+    if (!n) return null;
+    const lower = n.toLowerCase();
+    if (lower.endsWith('.png'))  return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif'))  return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.svg'))  return 'image/svg+xml';
+    return null;
+}
 
 function rowToMeta(row) {
     if (!row) return null;
-    const meta = row.meta && typeof row.meta === 'object' ? row.meta
-               : row.meta ? (() => { try { return JSON.parse(row.meta); } catch { return {}; } })()
-               : {};
-    // Ensure id + timestamps are always present even for older rows.
-    meta.id = row.id;
-    if (!meta.createdAt && row.created_at) meta.createdAt = new Date(row.created_at).getTime();
-    if (!meta.updatedAt && row.updated_at) meta.updatedAt = new Date(row.updated_at).getTime();
-    if (typeof meta.hideWindow !== 'boolean') meta.hideWindow = !!row.hide_window;
-    return meta;
+    let script = [];
+    if (row.launch_script != null) {
+        if (typeof row.launch_script === 'object') script = row.launch_script;
+        else { try { script = JSON.parse(row.launch_script); } catch { script = []; } }
+    }
+    if (!Array.isArray(script)) script = [];
+
+    // image_url may be either a direct blob URL or a pathname. If we don't
+    // have a separate pathname column, we derive one from the URL path.
+    let imagePathname = null;
+    if (row.image_url) {
+        try {
+            const u = new URL(row.image_url);
+            imagePathname = u.pathname.replace(/^\//, '') || null;
+        } catch {
+            imagePathname = row.image_url;
+        }
+    }
+    const imageName = basenameFromPathname(imagePathname);
+    const exeName   = basenameFromPathname(row.exe_pathname) || 'app.exe';
+
+    return {
+        id:            row.id,
+        title:         row.name || '',
+        description:   row.description || '',
+        exeName,
+        exeSize:       Number(row.exe_size_bytes || 0),
+        exeUrl:        row.exe_url || null,
+        exePathname:   row.exe_pathname || null,
+        imageName,
+        imageMime:     guessMimeFromName(imageName),
+        imageUrl:      row.image_url || null,
+        imagePathname,
+        hideWindow:    !!row.hide_window,
+        script,
+        active:        row.active == null ? true : !!row.active,
+        priceCents:    Number(row.price_cents || 0),
+        slug:          row.slug || null,
+        createdAt:     row.created_at ? new Date(row.created_at).getTime() : null,
+        updatedAt:     row.updated_at ? new Date(row.updated_at).getTime() : null,
+    };
+}
+
+function slugify(s) {
+    return String(s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 120) || 'product';
+}
+
+// ---- DB CRUD ----
+
+function assertDb() {
+    if (!hasDb()) throw new Error('DATABASE_URL not configured');
 }
 
 export async function listProducts() {
-    if (USE_DB) {
-        const rows = await q("SELECT id, meta, hide_window, created_at, updated_at FROM yh_products ORDER BY created_at DESC");
-        return rows.map(rowToMeta).filter(Boolean);
-    }
-    if (!redis) return [];
-    const ids = await redis.smembers(IDS_KEY);
-    if (!ids || ids.length === 0) return [];
-    const values = await redis.mget(...ids.map(META_KEY));
-    const out = [];
-    for (let i = 0; i < ids.length; i++) {
-        const v = values[i];
-        if (!v) continue;
-        try { out.push(typeof v === 'string' ? JSON.parse(v) : v); } catch {}
-    }
-    out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    return out;
+    assertDb();
+    const rows = await q(
+        `SELECT id, slug, name, description, image_url, exe_pathname, exe_url,
+                exe_size_bytes, hide_window, active, price_cents, launch_script,
+                created_at, updated_at
+           FROM products
+          ORDER BY created_at DESC`
+    );
+    return rows.map(rowToMeta).filter(Boolean);
 }
 
 export async function getProduct(id) {
-    if (USE_DB) {
-        const row = await q1("SELECT id, meta, hide_window, created_at, updated_at FROM yh_products WHERE id = ?", [id]);
-        return rowToMeta(row);
-    }
-    if (!redis) return null;
-    const v = await redis.get(META_KEY(id));
-    if (!v) return null;
-    return typeof v === 'string' ? JSON.parse(v) : v;
+    assertDb();
+    const row = await q1(
+        `SELECT id, slug, name, description, image_url, exe_pathname, exe_url,
+                exe_size_bytes, hide_window, active, price_cents, launch_script,
+                created_at, updated_at
+           FROM products WHERE id = ?`,
+        [id]
+    );
+    return rowToMeta(row);
 }
 
-export async function saveProduct(meta) {
-    if (USE_DB) {
-        // meta.id must be set. name/slug/exe_url mirror common fields for
-        // ad-hoc reporting; the source of truth is meta JSON.
-        const payload = { ...meta };
-        // Strip transient fields from JSON if any — keep it clean.
-        const jsonStr = JSON.stringify(payload);
-        await q(
-            `INSERT INTO yh_products (id, name, slug, exe_url, exe_pathname, image_urls, hide_window, meta)
-             VALUES (?, ?, NULL, ?, ?, NULL, ?, CAST(? AS JSON))
-             ON DUPLICATE KEY UPDATE
-                name         = VALUES(name),
-                exe_url      = VALUES(exe_url),
-                exe_pathname = VALUES(exe_pathname),
-                hide_window  = VALUES(hide_window),
-                meta         = VALUES(meta)`,
-            [
-                meta.id,
-                meta.title || null,
-                meta.exeUrl || null,
-                meta.exePathname || null,
-                meta.hideWindow ? 1 : 0,
-                jsonStr,
-            ]
+async function uniqueSlug(base, excludeId) {
+    let s = slugify(base);
+    let n = 0;
+    while (true) {
+        const candidate = n === 0 ? s : `${s}-${n}`;
+        const row = await q1(
+            `SELECT id FROM products WHERE slug = ? AND id <> ? LIMIT 1`,
+            [candidate, excludeId || '']
         );
-        return meta;
+        if (!row) return candidate;
+        n += 1;
+        if (n > 500) return `${s}-${crypto.randomBytes(3).toString('hex')}`;
     }
-    if (!redis) throw new Error('product store not configured');
-    await redis.set(META_KEY(meta.id), JSON.stringify(meta));
-    await redis.sadd(IDS_KEY, meta.id);
-    return meta;
+}
+
+// meta = legacy shape. Persists to the new `products` table.
+export async function saveProduct(meta) {
+    assertDb();
+    const slug = meta.slug || await uniqueSlug(meta.title || meta.exeName || 'product', meta.id);
+    const script = Array.isArray(meta.script) ? meta.script : [];
+    await q(
+        `INSERT INTO products
+            (id, slug, name, description, image_url, exe_pathname, exe_url,
+             exe_size_bytes, hide_window, active, price_cents, launch_script)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
+         ON DUPLICATE KEY UPDATE
+            slug           = VALUES(slug),
+            name           = VALUES(name),
+            description    = VALUES(description),
+            image_url      = VALUES(image_url),
+            exe_pathname   = VALUES(exe_pathname),
+            exe_url        = VALUES(exe_url),
+            exe_size_bytes = VALUES(exe_size_bytes),
+            hide_window    = VALUES(hide_window),
+            launch_script  = VALUES(launch_script)`,
+        [
+            meta.id,
+            slug,
+            meta.title || meta.exeName || 'product',
+            meta.description || null,
+            meta.imageUrl || null,
+            meta.exePathname || null,
+            meta.exeUrl || null,
+            Number(meta.exeSize || 0),
+            meta.hideWindow ? 1 : 0,
+            meta.active === false ? 0 : 1,
+            Number(meta.priceCents || 0),
+            JSON.stringify(script),
+        ]
+    );
+    return getProduct(meta.id);
 }
 
 export async function deleteProduct(id) {
@@ -148,13 +228,7 @@ export async function deleteProduct(id) {
     if (meta?.exeUrl)   kills.push(blobDel(meta.exeUrl).catch(() => {}));
     if (meta?.imageUrl) kills.push(blobDel(meta.imageUrl).catch(() => {}));
     await Promise.all(kills);
-    if (USE_DB) {
-        await q("DELETE FROM yh_products WHERE id = ?", [id]);
-        return;
-    }
-    if (!redis) return;
-    await redis.del(META_KEY(id));
-    await redis.srem(IDS_KEY, id);
+    await q(`DELETE FROM products WHERE id = ?`, [id]);
 }
 
 // ---- Public high-level API used by the routes ----
@@ -169,16 +243,17 @@ export async function createProduct({ exe, image, title }) {
     }
     const meta = {
         id,
-        title:      (title || '').trim() || e.name.replace(/\.exe$/i, ''),
-        exeName:    e.name,
-        exeSize:    e.size,
-        exeUrl:     e.url,
-        imageName:  img?.name || null,
-        imageMime:  img?.mime || null,
-        imageUrl:   img?.url  || null,
-        hideWindow: false,
-        script:     [],
-        createdAt:  Date.now(),
+        title:         (title || '').trim() || e.name.replace(/\.exe$/i, ''),
+        exeName:       e.name,
+        exeSize:       e.size,
+        exeUrl:        e.url,
+        exePathname:   e.pathname,
+        imageName:     img?.name || null,
+        imageMime:     img?.mime || null,
+        imageUrl:      img?.url  || null,
+        imagePathname: img?.pathname || null,
+        hideWindow:    false,
+        script:        [],
     };
     return saveProduct(meta);
 }
@@ -202,7 +277,6 @@ export async function createProductFromUrls({
         imagePathname: imagePathname || null,
         hideWindow:    false,
         script:        [],
-        createdAt:     Date.now(),
     };
     return saveProduct(meta);
 }
@@ -231,7 +305,6 @@ export async function updateProductFromUrls(id, {
     if (typeof title === 'string' && title.trim()) meta.title = title.trim();
     if (Array.isArray(script))                     meta.script = script;
     if (typeof hideWindow === 'boolean')           meta.hideWindow = hideWindow;
-    meta.updatedAt = Date.now();
     return saveProduct(meta);
 }
 
@@ -242,21 +315,22 @@ export async function updateProduct(id, { exe, image, title, script, hideWindow 
     if (exe && typeof exe !== 'string' && exe.size > 0) {
         if (meta.exeUrl) await blobDel(meta.exeUrl).catch(() => {});
         const e = await uploadExe(id, exe);
-        meta.exeName = e.name;
-        meta.exeSize = e.size;
-        meta.exeUrl  = e.url;
+        meta.exeName     = e.name;
+        meta.exeSize     = e.size;
+        meta.exeUrl      = e.url;
+        meta.exePathname = e.pathname;
     }
     if (image && typeof image !== 'string' && image.size > 0) {
         if (meta.imageUrl) await blobDel(meta.imageUrl).catch(() => {});
         const img = await uploadImage(id, image);
-        meta.imageName = img.name;
-        meta.imageMime = img.mime;
-        meta.imageUrl  = img.url;
+        meta.imageName     = img.name;
+        meta.imageMime     = img.mime;
+        meta.imageUrl      = img.url;
+        meta.imagePathname = img.pathname;
     }
     if (typeof title === 'string' && title.trim()) meta.title = title.trim();
     if (Array.isArray(script))                     meta.script = script;
     if (typeof hideWindow === 'boolean')           meta.hideWindow = hideWindow;
 
-    meta.updatedAt = Date.now();
     return saveProduct(meta);
 }

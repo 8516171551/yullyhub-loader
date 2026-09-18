@@ -164,7 +164,8 @@ function Clock() {
 
 export default function Page() {
     // ---- Auth gate (Yully credentials OR license key) ----
-    const [identity, setIdentity] = useState(null);      // { identity_type, identity_ref, license_key } | null
+    // Unified schema: /api/auth/me returns { ok, user: {id, email, username, role, display_name} }
+    const [identity, setIdentity] = useState(null);
     const [authLoading, setAuthLoading] = useState(true);
     useEffect(() => {
         let alive = true;
@@ -174,10 +175,12 @@ export default function Page() {
                 if (!alive) return;
                 if (r.ok) {
                     const j = await r.json();
-                    if (j.ok) setIdentity({
-                        identity_type: j.identity_type,
-                        identity_ref:  j.identity_ref,
-                        license_key:   j.license_key,
+                    if (j.ok && j.user) setIdentity({
+                        id:       j.user.id,
+                        email:    j.user.email,
+                        username: j.user.username,
+                        role:     j.user.role,
+                        display:  j.user.display_name || j.user.username || j.user.email,
                     });
                 }
             } catch {}

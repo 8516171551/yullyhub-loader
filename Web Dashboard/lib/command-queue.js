@@ -1,11 +1,10 @@
-// Command queue backed by the shared MySQL DB (yh_commands + yh_loader_sessions).
+// Command queue backed by the shared MySQL DB (loader_commands + loader_sessions).
 //
-// One row per queued command in yh_commands. Poll drains rows for a
-// loaderId in one transaction (SELECT ... FOR UPDATE + DELETE). Online
-// tracking lives on yh_loader_sessions.last_seen_at (auto-touched by
-// heartbeat + poll).
+// One row per queued command in loader_commands. Poll drains rows for a
+// loaderId (SELECT + DELETE). Online tracking lives on
+// loader_sessions.last_seen_at (auto-touched by heartbeat + poll).
 //
-// See _yullyhub_readme row id=1 in the DB for ownership rules.
+// See _readme row id=1 in the DB for ownership rules.
 
 import { q, hasDb } from './db.js';
 
@@ -42,7 +41,7 @@ export async function markSeen(loaderId, info) {
     // or cookie session.
     try {
         const updated = await q(
-            `UPDATE yh_loader_sessions
+            `UPDATE loader_sessions
                 SET last_seen_at = CURRENT_TIMESTAMP,
                     user_agent   = COALESCE(?, user_agent)
               WHERE loader_id = ? AND revoked_at IS NULL`,
@@ -53,11 +52,11 @@ export async function markSeen(loaderId, info) {
             const id = crypto.randomUUID();
             const tok = crypto.randomBytes(32).toString('hex');
             await q(
-                `INSERT INTO yh_loader_sessions
+                `INSERT INTO loader_sessions
                     (id, license_key, loader_id, session_token, user_agent)
-                 VALUES (?, ?, ?, ?, ?)
+                 VALUES (?, NULL, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE last_seen_at = CURRENT_TIMESTAMP`,
-                [id, '_ANON_', loaderId, tok, info?.ua || null]
+                [id, loaderId, tok, info?.ua || null]
             );
         }
     } catch {}
@@ -68,7 +67,7 @@ export async function onlineLoaders() {
     const cutoff = new Date(Date.now() - ONLINE_TTL_MS);
     const rows = await q(
         `SELECT loader_id, MAX(UNIX_TIMESTAMP(last_seen_at)) AS last_seen
-           FROM yh_loader_sessions
+           FROM loader_sessions
           WHERE revoked_at IS NULL AND last_seen_at >= ?
           GROUP BY loader_id
           ORDER BY last_seen DESC`,
@@ -84,14 +83,14 @@ export async function push(loaderId, command) {
         const online = await onlineLoaders();
         for (const l of online) {
             await q(
-                `INSERT INTO yh_commands (loader_id, payload) VALUES (?, CAST(? AS JSON))`,
+                `INSERT INTO loader_commands (loader_id, payload) VALUES (?, CAST(? AS JSON))`,
                 [l.id, json]
             );
         }
         return { broadcast: true, delivered: online.length };
     }
     await q(
-        `INSERT INTO yh_commands (loader_id, payload) VALUES (?, CAST(? AS JSON))`,
+        `INSERT INTO loader_commands (loader_id, payload) VALUES (?, CAST(? AS JSON))`,
         [loaderId, json]
     );
     return { broadcast: false, delivered: 1 };
@@ -101,7 +100,7 @@ export async function drain(loaderId) {
     if (!hasDb()) return [];
     // Atomic drain: grab the id list, then delete those rows by id.
     const rows = await q(
-        `SELECT id, payload FROM yh_commands
+        `SELECT id, payload FROM loader_commands
           WHERE loader_id = ? AND picked_at IS NULL
           ORDER BY id ASC`,
         [loaderId]
@@ -109,7 +108,7 @@ export async function drain(loaderId) {
     if (!rows.length) return [];
     const ids = rows.map(r => r.id);
     const placeholders = ids.map(() => '?').join(',');
-    await q(`DELETE FROM yh_commands WHERE id IN (${placeholders})`, ids);
+    await q(`DELETE FROM loader_commands WHERE id IN (${placeholders})`, ids);
     return rows.map(r => {
         try { return typeof r.payload === 'object' ? r.payload : JSON.parse(r.payload); }
         catch { return null; }
