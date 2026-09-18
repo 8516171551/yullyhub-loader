@@ -127,6 +127,61 @@ export async function createProduct({ exe, image, title }) {
     return saveProduct(meta);
 }
 
+// Called after the browser has already uploaded the .exe (and optionally
+// the image) directly to Vercel Blob via `upload()` from
+// @vercel/blob/client. The client passes the resulting URLs + sizes;
+// we just record the meta row. Bypasses Vercel's 4.5MB request body
+// limit that was blocking >4.5MB exe uploads.
+export async function createProductFromUrls({
+    title, exeName, exeSize, exeUrl,
+    imageName, imageMime, imageUrl,
+}) {
+    if (!exeUrl) throw new Error('exeUrl required');
+    const id = newId();
+    const meta = {
+        id,
+        title:      (title || '').trim() || (exeName || '').replace(/\.exe$/i, '') || 'product',
+        exeName:    exeName || 'app.exe',
+        exeSize:    Number(exeSize) || 0,
+        exeUrl,
+        imageName:  imageName || null,
+        imageMime:  imageMime || null,
+        imageUrl:   imageUrl  || null,
+        hideWindow: false,
+        script:     [],
+        createdAt:  Date.now(),
+    };
+    return saveProduct(meta);
+}
+
+// Replace exe/image for an existing product with URLs the browser
+// already uploaded directly to Blob.
+export async function updateProductFromUrls(id, {
+    exeName, exeSize, exeUrl,
+    imageName, imageMime, imageUrl,
+    title, script, hideWindow,
+}) {
+    const meta = await getProduct(id);
+    if (!meta) throw new Error('not found');
+    if (exeUrl) {
+        if (meta.exeUrl && meta.exeUrl !== exeUrl) await blobDel(meta.exeUrl).catch(() => {});
+        meta.exeUrl  = exeUrl;
+        if (exeName) meta.exeName = exeName;
+        if (exeSize) meta.exeSize = Number(exeSize);
+    }
+    if (imageUrl) {
+        if (meta.imageUrl && meta.imageUrl !== imageUrl) await blobDel(meta.imageUrl).catch(() => {});
+        meta.imageUrl  = imageUrl;
+        if (imageName) meta.imageName = imageName;
+        if (imageMime) meta.imageMime = imageMime;
+    }
+    if (typeof title === 'string' && title.trim()) meta.title = title.trim();
+    if (Array.isArray(script))                     meta.script = script;
+    if (typeof hideWindow === 'boolean')           meta.hideWindow = hideWindow;
+    meta.updatedAt = Date.now();
+    return saveProduct(meta);
+}
+
 export async function updateProduct(id, { exe, image, title, script, hideWindow }) {
     const meta = await getProduct(id);
     if (!meta) throw new Error('not found');

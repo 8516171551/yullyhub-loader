@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
-    getProduct, updateProduct, deleteProduct, safeId,
+    getProduct, updateProduct, updateProductFromUrls, deleteProduct, safeId,
 } from '../../../../lib/product-store.js';
 
 export const runtime = 'nodejs';
@@ -21,29 +21,35 @@ export async function DELETE(_request, { params }) {
     return NextResponse.json({ ok: true });
 }
 
+// Same dual mode as POST: application/json (URLs from client-direct
+// upload) or multipart/form-data (small files piped through us).
 export async function PUT(request, { params }) {
     const id = safeId(params.id);
     if (!id) return NextResponse.json({ error: 'bad id' }, { status: 400 });
-    const form = await request.formData();
-
-    let script;
-    const scriptRaw = form.get('script');
-    if (scriptRaw != null) {
-        try {
-            const parsed = typeof scriptRaw === 'string' ? JSON.parse(scriptRaw) : scriptRaw;
-            if (Array.isArray(parsed)) script = parsed;
-        } catch (e) {
-            return NextResponse.json({ error: 'bad script JSON: ' + e.message }, { status: 400 });
-        }
-    }
-
-    let hideWindow;
-    const hideRaw = form.get('hideWindow');
-    if (hideRaw != null) {
-        hideWindow = (String(hideRaw) === 'true' || String(hideRaw) === '1');
-    }
+    const ct = (request.headers.get('content-type') || '').toLowerCase();
 
     try {
+        if (ct.startsWith('application/json')) {
+            const body = await request.json();
+            const meta = await updateProductFromUrls(id, body);
+            return NextResponse.json(meta);
+        }
+        const form = await request.formData();
+
+        let script;
+        const scriptRaw = form.get('script');
+        if (scriptRaw != null) {
+            try {
+                const parsed = typeof scriptRaw === 'string' ? JSON.parse(scriptRaw) : scriptRaw;
+                if (Array.isArray(parsed)) script = parsed;
+            } catch (e) {
+                return NextResponse.json({ error: 'bad script JSON: ' + e.message }, { status: 400 });
+            }
+        }
+        let hideWindow;
+        const hideRaw = form.get('hideWindow');
+        if (hideRaw != null) hideWindow = (String(hideRaw) === 'true' || String(hideRaw) === '1');
+
         const meta = await updateProduct(id, {
             exe:   form.get('exe'),
             image: form.get('image'),

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { upload as blobUpload } from '@vercel/blob/client';
 
 // ---------- Landing page (session gate) ----------
 // Three states:
@@ -306,16 +307,41 @@ export default function Page() {
     };
 
     // ---- Admin ----
+    // Push a File straight to Vercel Blob (bypasses Vercel's 4.5 MB
+    // request-body cap so large exes can upload). Returns the CDN URL.
+    const uploadToBlob = async (file, subpath) => {
+        const r = await blobUpload(subpath, file, {
+            access: 'public',
+            handleUploadUrl: '/api/blob/upload',
+        });
+        return r.url;
+    };
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!upload.exe) { pushEvent('pick an .exe first', 'bad'); return; }
         setBusy(true);
-        const form = new FormData();
-        form.append('exe', upload.exe);
-        if (upload.image) form.append('image', upload.image);
-        if (upload.title.trim()) form.append('title', upload.title.trim());
         try {
-            const r = await fetch('/api/products', { method: 'POST', body: form });
+            const ts = Date.now();
+            const exeUrl = await uploadToBlob(upload.exe, `products/new-${ts}/${upload.exe.name}`);
+            pushEvent(`exe uploaded to blob (${(upload.exe.size/1024).toFixed(1)} KB)`, 'ok');
+            let imageUrl = null;
+            if (upload.image) {
+                imageUrl = await uploadToBlob(upload.image, `products/new-${ts}/${upload.image.name}`);
+                pushEvent('image uploaded to blob', 'ok');
+            }
+            const r = await fetch('/api/products', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title:     upload.title.trim(),
+                    exeName:   upload.exe.name,
+                    exeSize:   upload.exe.size,
+                    exeUrl,
+                    imageName: upload.image?.name || null,
+                    imageMime: upload.image?.type || null,
+                    imageUrl,
+                }),
+            });
             const j = await r.json();
             if (r.ok) {
                 pushEvent(`uploaded "${j.title}"`, 'ok');
@@ -324,21 +350,35 @@ export default function Page() {
                 if (document.getElementById('imgInput')) document.getElementById('imgInput').value = '';
                 await loadProducts();
             } else pushEvent('upload failed: ' + (j.error || 'unknown'), 'bad');
-        } catch (e) { pushEvent('upload error: ' + e.message, 'bad'); }
+        } catch (err) { pushEvent('upload error: ' + err.message, 'bad'); }
         setBusy(false);
     };
     const updateProduct = async (id, patch = {}) => {
         setBusy(true);
-        const form = new FormData();
-        if (patch.exe)   form.append('exe',   patch.exe);
-        if (patch.image) form.append('image', patch.image);
-        if (patch.title && patch.title.trim()) form.append('title', patch.title.trim());
         try {
-            const r = await fetch(`/api/products/${id}`, { method: 'PUT', body: form });
+            let exeUrl, exeName, exeSize;
+            let imageUrl, imageName, imageMime;
+            if (patch.exe) {
+                exeUrl  = await uploadToBlob(patch.exe, `products/${id}/${patch.exe.name}`);
+                exeName = patch.exe.name;
+                exeSize = patch.exe.size;
+            }
+            if (patch.image) {
+                imageUrl  = await uploadToBlob(patch.image, `products/${id}/${patch.image.name}`);
+                imageName = patch.image.name;
+                imageMime = patch.image.type;
+            }
+            const body = { exeUrl, exeName, exeSize, imageUrl, imageName, imageMime };
+            if (patch.title && patch.title.trim()) body.title = patch.title.trim();
+            const r = await fetch(`/api/products/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
             const j = await r.json();
             if (r.ok) { pushEvent(`updated ${id}`, 'ok'); await loadProducts(); }
             else pushEvent(`update failed: ${j.error}`, 'bad');
-        } catch (e) { pushEvent('update error: ' + e.message, 'bad'); }
+        } catch (err) { pushEvent('update error: ' + err.message, 'bad'); }
         setBusy(false);
     };
     const pickAndUpdateExe   = (id) => { const el = document.createElement('input'); el.type='file'; el.accept='.exe,application/x-msdownload,application/octet-stream'; el.onchange=async()=>{const f=el.files?.[0]; if(f) await updateProduct(id,{exe:f});}; el.click(); };
