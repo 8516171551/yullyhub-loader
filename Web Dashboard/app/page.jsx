@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { upload as blobUpload } from '@vercel/blob/client';
+import { uploadPresigned as blobUpload } from '@vercel/blob/client';
 
 // ---------- Landing page (session gate) ----------
 // Three states:
@@ -308,13 +308,15 @@ export default function Page() {
 
     // ---- Admin ----
     // Push a File straight to Vercel Blob (bypasses Vercel's 4.5 MB
-    // request-body cap so large exes can upload). Returns the CDN URL.
+    // request-body cap). Returns { pathname, url }. Store is private
+    // so `url` is short-lived — we regenerate a presigned GET each time
+    // a client asks for the exe / image via /api/products/<id>/{exe,image}.
     const uploadToBlob = async (file, subpath) => {
         const r = await blobUpload(subpath, file, {
             access: 'public',
             handleUploadUrl: '/api/blob/upload',
         });
-        return r.url;
+        return { pathname: r.pathname, url: r.url };
     };
     const handleUpload = async (e) => {
         e.preventDefault();
@@ -322,24 +324,26 @@ export default function Page() {
         setBusy(true);
         try {
             const ts = Date.now();
-            const exeUrl = await uploadToBlob(upload.exe, `products/new-${ts}/${upload.exe.name}`);
+            const exe = await uploadToBlob(upload.exe, `products/new-${ts}/${upload.exe.name}`);
             pushEvent(`exe uploaded to blob (${(upload.exe.size/1024).toFixed(1)} KB)`, 'ok');
-            let imageUrl = null;
+            let img = null;
             if (upload.image) {
-                imageUrl = await uploadToBlob(upload.image, `products/new-${ts}/${upload.image.name}`);
+                img = await uploadToBlob(upload.image, `products/new-${ts}/${upload.image.name}`);
                 pushEvent('image uploaded to blob', 'ok');
             }
             const r = await fetch('/api/products', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    title:     upload.title.trim(),
-                    exeName:   upload.exe.name,
-                    exeSize:   upload.exe.size,
-                    exeUrl,
-                    imageName: upload.image?.name || null,
-                    imageMime: upload.image?.type || null,
-                    imageUrl,
+                    title:        upload.title.trim(),
+                    exeName:      upload.exe.name,
+                    exeSize:      upload.exe.size,
+                    exePathname:  exe.pathname,
+                    exeUrl:       exe.url,
+                    imageName:    upload.image?.name || null,
+                    imageMime:    upload.image?.type || null,
+                    imagePathname:img?.pathname || null,
+                    imageUrl:     img?.url || null,
                 }),
             });
             const j = await r.json();
@@ -356,19 +360,21 @@ export default function Page() {
     const updateProduct = async (id, patch = {}) => {
         setBusy(true);
         try {
-            let exeUrl, exeName, exeSize;
-            let imageUrl, imageName, imageMime;
+            const body = {};
             if (patch.exe) {
-                exeUrl  = await uploadToBlob(patch.exe, `products/${id}/${patch.exe.name}`);
-                exeName = patch.exe.name;
-                exeSize = patch.exe.size;
+                const e = await uploadToBlob(patch.exe, `products/${id}/${patch.exe.name}`);
+                body.exePathname = e.pathname;
+                body.exeUrl      = e.url;
+                body.exeName     = patch.exe.name;
+                body.exeSize     = patch.exe.size;
             }
             if (patch.image) {
-                imageUrl  = await uploadToBlob(patch.image, `products/${id}/${patch.image.name}`);
-                imageName = patch.image.name;
-                imageMime = patch.image.type;
+                const i = await uploadToBlob(patch.image, `products/${id}/${patch.image.name}`);
+                body.imagePathname = i.pathname;
+                body.imageUrl      = i.url;
+                body.imageName     = patch.image.name;
+                body.imageMime     = patch.image.type;
             }
-            const body = { exeUrl, exeName, exeSize, imageUrl, imageName, imageMime };
             if (patch.title && patch.title.trim()) body.title = patch.title.trim();
             const r = await fetch(`/api/products/${id}`, {
                 method: 'PUT',
@@ -729,7 +735,17 @@ export default function Page() {
                                                                     onClick={() => pickImageFromUrl(src)}
                                                                     title={k}
                                                                 >
-                                                                    <img src={`/api/imgproxy?url=${encodeURIComponent(src)}`} alt={k}/>
+                                                                    <img
+                                                                        src={`/api/imgproxy?url=${encodeURIComponent(src)}`}
+                                                                        alt={k}
+                                                                        onError={(e) => {
+                                                                            // Game doesn't publish this variant —
+                                                                            // yank the button entirely so the picker
+                                                                            // isn't a wall of empty boxes.
+                                                                            const btn = e.currentTarget.closest('button');
+                                                                            if (btn) btn.style.display = 'none';
+                                                                        }}
+                                                                    />
                                                                     <span className="v-label">{k}</span>
                                                                 </button>
                                                             );

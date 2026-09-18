@@ -39,18 +39,11 @@ export async function GET(request) {
     try {
         const r = await fetch(src.toString(), { headers: { 'User-Agent': 'YullyHub/1.0' } });
         if (r.status === 404) {
-            // Missing asset — many games don't publish every variant.
-            // Return a tiny transparent PNG instead of a 502 so the
-            // browser doesn't render a broken-image icon.
-            const transparent = Buffer.from(
-                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-                'base64');
-            return new NextResponse(transparent, {
-                headers: {
-                    'Content-Type': 'image/png',
-                    'Cache-Control': 'public, max-age=86400',
-                    'Access-Control-Allow-Origin': '*',
-                },
+            // Explicit 404 so the browser's img.onError fires and the
+            // client can hide the variant button entirely.
+            return new NextResponse('not found', {
+                status: 404,
+                headers: { 'Access-Control-Allow-Origin': '*' },
             });
         }
         if (!r.ok) return NextResponse.json({ error: 'upstream ' + r.status }, { status: 502 });

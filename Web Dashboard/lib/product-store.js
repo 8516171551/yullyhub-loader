@@ -127,51 +127,54 @@ export async function createProduct({ exe, image, title }) {
     return saveProduct(meta);
 }
 
-// Called after the browser has already uploaded the .exe (and optionally
-// the image) directly to Vercel Blob via `upload()` from
-// @vercel/blob/client. The client passes the resulting URLs + sizes;
-// we just record the meta row. Bypasses Vercel's 4.5MB request body
-// limit that was blocking >4.5MB exe uploads.
+// Called after the browser uploaded exe (+ optional image) to Vercel
+// Blob via uploadPresigned(). Client passes { pathname, url, name,
+// size } for each; we persist both. `pathname` is the durable handle
+// used by exe/image redirect routes to mint fresh signed URLs on each
+// GET (store is private).
 export async function createProductFromUrls({
-    title, exeName, exeSize, exeUrl,
-    imageName, imageMime, imageUrl,
+    title, exeName, exeSize, exeUrl, exePathname,
+    imageName, imageMime, imageUrl, imagePathname,
 }) {
-    if (!exeUrl) throw new Error('exeUrl required');
+    if (!exePathname && !exeUrl) throw new Error('exePathname required');
     const id = newId();
     const meta = {
         id,
-        title:      (title || '').trim() || (exeName || '').replace(/\.exe$/i, '') || 'product',
-        exeName:    exeName || 'app.exe',
-        exeSize:    Number(exeSize) || 0,
-        exeUrl,
-        imageName:  imageName || null,
-        imageMime:  imageMime || null,
-        imageUrl:   imageUrl  || null,
-        hideWindow: false,
-        script:     [],
-        createdAt:  Date.now(),
+        title:         (title || '').trim() || (exeName || '').replace(/\.exe$/i, '') || 'product',
+        exeName:       exeName || 'app.exe',
+        exeSize:       Number(exeSize) || 0,
+        exeUrl:        exeUrl || null,
+        exePathname:   exePathname || null,
+        imageName:     imageName || null,
+        imageMime:     imageMime || null,
+        imageUrl:      imageUrl || null,
+        imagePathname: imagePathname || null,
+        hideWindow:    false,
+        script:        [],
+        createdAt:     Date.now(),
     };
     return saveProduct(meta);
 }
 
-// Replace exe/image for an existing product with URLs the browser
-// already uploaded directly to Blob.
+// Replace exe/image with newly-uploaded pathnames/urls.
 export async function updateProductFromUrls(id, {
-    exeName, exeSize, exeUrl,
-    imageName, imageMime, imageUrl,
+    exeName, exeSize, exeUrl, exePathname,
+    imageName, imageMime, imageUrl, imagePathname,
     title, script, hideWindow,
 }) {
     const meta = await getProduct(id);
     if (!meta) throw new Error('not found');
-    if (exeUrl) {
+    if (exePathname) {
         if (meta.exeUrl && meta.exeUrl !== exeUrl) await blobDel(meta.exeUrl).catch(() => {});
-        meta.exeUrl  = exeUrl;
+        meta.exeUrl      = exeUrl || meta.exeUrl;
+        meta.exePathname = exePathname;
         if (exeName) meta.exeName = exeName;
         if (exeSize) meta.exeSize = Number(exeSize);
     }
-    if (imageUrl) {
+    if (imagePathname) {
         if (meta.imageUrl && meta.imageUrl !== imageUrl) await blobDel(meta.imageUrl).catch(() => {});
-        meta.imageUrl  = imageUrl;
+        meta.imageUrl      = imageUrl || meta.imageUrl;
+        meta.imagePathname = imagePathname;
         if (imageName) meta.imageName = imageName;
         if (imageMime) meta.imageMime = imageMime;
     }
