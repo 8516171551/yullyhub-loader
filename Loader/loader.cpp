@@ -19,6 +19,9 @@
 #include <cstring>
 #include <intrin.h>
 #include <winternl.h>
+#include <objidl.h>   // required by gdiplus
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -1161,6 +1164,404 @@ static bool spawn_mem_child(const std::string& url, const std::string& title) {
     return true;
 }
 
+/* ==========================================================================
+   Native Dynamic Island — pure Win32 + GDI+ overlay
+   --------------------------------------------------------------------------
+   No browser. No Chrome frame. Just a WS_POPUP + WS_EX_LAYERED window
+   painted with GDI+ (rounded pill, text, loading dots, checkmark). Sits
+   above every app via WS_EX_TOPMOST. Composited with per-pixel alpha via
+   UpdateLayeredWindow so the corners are cleanly antialiased with the
+   desktop underneath.
+   ========================================================================== */
+
+struct PillStep {
+    std::string kind;     // "loading" | "message" | "success" | "close"
+    std::string text;
+    double      timeout;  // seconds
+    std::string dismiss;  // "timeout" | "keybind" | "both"
+    std::string keybind;  // e.g. "F2"
+};
+
+static std::vector<PillStep> g_pill_steps;
+static int         g_pill_idx           = 0;
+static std::string g_pill_product;
+static HWND        g_pill_hwnd          = NULL;
+static ULONGLONG   g_pill_step_started  = 0;
+static ULONGLONG   g_pill_bounce_at     = 0;
+static ULONG_PTR   g_gdip_token         = 0;
+static int         g_pill_w             = 380;
+static int         g_pill_h             = 60;
+
+// Parse a numeric field from a JSON object substring — falls back to `def`
+// if key isn't present or isn't a number.
+static double extract_num(const std::string& obj, const std::string& key, double def) {
+    std::string needle = "\"" + key + "\"";
+    size_t p = obj.find(needle);
+    if (p == std::string::npos) return def;
+    p = obj.find(':', p);
+    if (p == std::string::npos) return def;
+    p++;
+    while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t')) p++;
+    if (p >= obj.size()) return def;
+    return atof(obj.c_str() + p);
+}
+
+// Take the raw JSON array string from the `island` command's `script`
+// field and turn it into PillStep objects.
+static void parse_pill_steps(const std::string& arrayJson, std::vector<PillStep>& out) {
+    // extract_object_array walks arrays under a named key; wrap our raw
+    // array so it can be reused instead of writing a new parser.
+    std::string wrapped = "{\"s\":" + (arrayJson.empty() ? std::string("[]") : arrayJson) + "}";
+    auto objs = extract_object_array(wrapped, "s");
+    for (auto& o : objs) {
+        PillStep s;
+        s.kind    = extract_str(o, "kind");
+        s.text    = extract_str(o, "text");
+        s.dismiss = extract_str(o, "dismiss");
+        s.keybind = extract_str(o, "keybind");
+        s.timeout = extract_num(o, "timeout", 2.0);
+        if (s.kind.empty()) s.kind = "message";
+        out.push_back(s);
+    }
+}
+
+// Convert UTF-8 std::string → wide UTF-16 for GDI+.
+static std::wstring to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
+}
+
+// Rough VK code lookup for F1..F12, letters, numbers, common named keys.
+// Only used to advance a step whose `dismiss` includes keybind.
+static UINT vk_from_name(const std::string& name) {
+    if (name.empty()) return 0;
+    std::string u; for (char c : name) u.push_back((char)toupper((unsigned char)c));
+    if (u.size() >= 2 && u[0] == 'F') {
+        int n = atoi(u.c_str() + 1);
+        if (n >= 1 && n <= 24) return VK_F1 + (n - 1);
+    }
+    if (u.size() == 1) {
+        if (u[0] >= 'A' && u[0] <= 'Z') return (UINT)u[0];
+        if (u[0] >= '0' && u[0] <= '9') return (UINT)u[0];
+    }
+    if (u == "SPACE")  return VK_SPACE;
+    if (u == "ENTER" || u == "RETURN") return VK_RETURN;
+    if (u == "TAB")    return VK_TAB;
+    if (u == "ESC" || u == "ESCAPE") return VK_ESCAPE;
+    return 0;
+}
+
+// Cubic-bezier(0.34, 1.56, 0.64, 1) approximation (iOS pop).
+static double ease_pop(double t) {
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
+    // easeOutBack — good stand-in for the iOS spring
+    double c1 = 1.70158, c3 = c1 + 1.0;
+    double u = t - 1.0;
+    return 1.0 + c3 * u * u * u + c1 * u * u;
+}
+
+// Paint the pill into a top-down DIB and hand it to UpdateLayeredWindow.
+// Per-pixel alpha means the rounded corners composite cleanly over the
+// desktop with no jaggies.
+static void draw_pill_frame(HWND hwnd) {
+    using namespace Gdiplus;
+
+    int w = g_pill_w, h = g_pill_h;
+    HDC screen = GetDC(NULL);
+    HDC mem    = CreateCompatibleDC(screen);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;   // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = NULL;
+    HBITMAP dib = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HBITMAP old = (HBITMAP)SelectObject(mem, dib);
+    memset(bits, 0, (size_t)w * h * 4);
+
+    if (g_pill_idx < (int)g_pill_steps.size()) {
+        const PillStep& step = g_pill_steps[g_pill_idx];
+
+        // Pop animation — new step OR click bounce.
+        ULONGLONG now = GetTickCount64();
+        ULONGLONG t0  = std::max<ULONGLONG>(g_pill_step_started, g_pill_bounce_at);
+        double t = (double)(now - t0) / 620.0;
+        double scale = (t >= 1.0) ? 1.0 : (0.6 + 0.4 * ease_pop(t));
+
+        Graphics g(mem);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+
+        // Center + scale
+        REAL cx = (REAL)w / 2, cy = (REAL)h / 2;
+        g.TranslateTransform(cx, cy);
+        g.ScaleTransform((REAL)scale, (REAL)scale);
+        g.TranslateTransform(-cx, -cy);
+
+        int px = 6, py = 6, pw = w - 12, ph = h - 12;
+        int r  = ph / 2;
+
+        // Rounded rectangle path
+        GraphicsPath path;
+        path.AddArc(px,             py, r*2, r*2,  90, 180);
+        path.AddArc(px + pw - r*2,  py, r*2, r*2, 270, 180);
+        path.CloseFigure();
+
+        // Fill — nearly opaque black
+        Color bg(240, 10, 10, 13);
+        if (step.kind == "success") bg = Color(240, 8, 26, 16);
+        if (step.kind == "close")   bg = Color(240, 26, 10, 16);
+        SolidBrush bgBrush(bg);
+        g.FillPath(&bgBrush, &path);
+
+        // Subtle border
+        Color border(30, 255, 255, 255);
+        if (step.kind == "success") border = Color(120, 56, 214, 122);
+        if (step.kind == "close")   border = Color(140, 233, 17, 55);
+        Pen borderPen(border, 1.0f);
+        g.DrawPath(&borderPen, &path);
+
+        // Content area layout — icon on the left, text centered
+        int contentX = px + 22;
+        int contentY = py;
+        int contentH = ph;
+
+        // Loading dots
+        if (step.kind == "loading") {
+            ULONGLONG dotAnim = (now - g_pill_step_started) % 1200;
+            for (int i = 0; i < 3; i++) {
+                double phase = (double)(dotAnim + i * 160) / 1200.0;
+                double a = 0.4 + 0.6 * (0.5 + 0.5 * sin(phase * 6.28318));
+                int dotY = contentY + contentH / 2 - 3;
+                Color c(int(a * 255), 230, 230, 234);
+                SolidBrush db(c);
+                g.FillEllipse(&db, contentX + i * 12, dotY, 6, 6);
+            }
+            contentX += 44;
+        }
+
+        // Success checkmark
+        if (step.kind == "success") {
+            int cy2 = contentY + contentH / 2;
+            SolidBrush okB(Color(255, 52, 214, 122));
+            g.FillEllipse(&okB, contentX - 4, cy2 - 10, 20, 20);
+            Pen tick(Color(255, 5, 23, 14), 2.4f);
+            tick.SetStartCap(LineCapRound);
+            tick.SetEndCap(LineCapRound);
+            PointF pts[3] = {
+                PointF((REAL)contentX + 1,  (REAL)cy2 + 1),
+                PointF((REAL)contentX + 5,  (REAL)cy2 + 5),
+                PointF((REAL)contentX + 12, (REAL)cy2 - 3),
+            };
+            g.DrawLines(&tick, pts, 3);
+            contentX += 28;
+        }
+
+        // Text
+        std::wstring wtext = to_wide(step.text.empty() ? std::string(step.kind == "close" ? "Click to close" : "") : step.text);
+        Font        font(L"Segoe UI", 12.5f, FontStyleRegular, UnitPixel);
+        SolidBrush  textBrush(Color(255, 245, 245, 247));
+        StringFormat fmt;
+        fmt.SetAlignment(StringAlignmentNear);
+        fmt.SetLineAlignment(StringAlignmentCenter);
+
+        // Keybind chip
+        int textRight = px + pw - 12;
+        if ((step.dismiss == "keybind" || step.dismiss == "both") && !step.keybind.empty()) {
+            std::wstring kw = to_wide(step.keybind);
+            Font        kfont(L"Consolas", 11.0f, FontStyleBold, UnitPixel);
+            SolidBrush  kbBg(Color(48, 255, 255, 255));
+            SolidBrush  kbFg(Color(255, 245, 245, 247));
+            RectF meas;
+            g.MeasureString(kw.c_str(), -1, &kfont, PointF(0, 0), &meas);
+            int chipW = (int)meas.Width + 14;
+            int chipH = ph - 22;
+            int chipX = textRight - chipW;
+            int chipY = py + (ph - chipH) / 2;
+            GraphicsPath cp;
+            int cr = 4;
+            cp.AddArc(chipX,               chipY, cr*2, cr*2, 180, 90);
+            cp.AddArc(chipX + chipW - cr*2, chipY, cr*2, cr*2, 270, 90);
+            cp.AddArc(chipX + chipW - cr*2, chipY + chipH - cr*2, cr*2, cr*2, 0, 90);
+            cp.AddArc(chipX,               chipY + chipH - cr*2, cr*2, cr*2, 90, 90);
+            cp.CloseFigure();
+            g.FillPath(&kbBg, &cp);
+            RectF kr((REAL)chipX, (REAL)chipY, (REAL)chipW, (REAL)chipH);
+            StringFormat kfmt;
+            kfmt.SetAlignment(StringAlignmentCenter);
+            kfmt.SetLineAlignment(StringAlignmentCenter);
+            g.DrawString(kw.c_str(), -1, &kfont, kr, &kfmt, &kbFg);
+            textRight = chipX - 8;
+        }
+
+        int textW = textRight - contentX;
+        RectF trect((REAL)contentX, (REAL)contentY, (REAL)textW, (REAL)contentH);
+        g.DrawString(wtext.c_str(), -1, &font, trect, &fmt, &textBrush);
+    }
+
+    // Composite onto the desktop.
+    RECT wr; GetWindowRect(hwnd, &wr);
+    POINT ptDst = { wr.left, wr.top };
+    SIZE  sz    = { w, h };
+    POINT ptSrc = { 0, 0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(hwnd, screen, &ptDst, &sz, mem, &ptSrc, 0, &bf, ULW_ALPHA);
+
+    SelectObject(mem, old);
+    DeleteObject(dib);
+    DeleteDC(mem);
+    ReleaseDC(NULL, screen);
+}
+
+static void pill_advance() {
+    if (!g_pill_hwnd) return;
+    g_pill_idx++;
+    if (g_pill_idx >= (int)g_pill_steps.size()) {
+        DestroyWindow(g_pill_hwnd);
+        return;
+    }
+    g_pill_step_started = GetTickCount64();
+    KillTimer(g_pill_hwnd, 2);
+    UINT ms = (UINT)(g_pill_steps[g_pill_idx].timeout * 1000);
+    if (ms < 300) ms = 300;
+    SetTimer(g_pill_hwnd, 2, ms, NULL);
+    draw_pill_frame(g_pill_hwnd);
+}
+
+static LRESULT CALLBACK pill_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_CREATE:
+            g_pill_step_started = GetTickCount64();
+            SetTimer(hwnd, 1, 16, NULL);
+            if (!g_pill_steps.empty()) {
+                UINT ms = (UINT)(g_pill_steps[0].timeout * 1000);
+                if (ms < 300) ms = 300;
+                SetTimer(hwnd, 2, ms, NULL);
+            }
+            return 0;
+        case WM_TIMER:
+            if (wp == 1) draw_pill_frame(hwnd);
+            else if (wp == 2) pill_advance();
+            return 0;
+        case WM_LBUTTONDOWN:
+            g_pill_bounce_at = GetTickCount64();
+            draw_pill_frame(hwnd);
+            return 0;
+        case WM_DESTROY:
+            KillTimer(hwnd, 1);
+            KillTimer(hwnd, 2);
+            PostQuitMessage(0);
+            return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// Global low-level keyboard hook — needed because the pill window is
+// TOPMOST + NOACTIVATE, so it never has keyboard focus. LL hook sees
+// keypresses regardless of which app is foreground.
+static HHOOK g_pill_kbd_hook = NULL;
+static LRESULT CALLBACK pill_kbd_hook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && wp == WM_KEYDOWN && g_pill_hwnd &&
+        g_pill_idx < (int)g_pill_steps.size()) {
+        KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lp;
+        const PillStep& s = g_pill_steps[g_pill_idx];
+        if (s.dismiss == "keybind" || s.dismiss == "both") {
+            UINT want = vk_from_name(s.keybind);
+            if (want && k->vkCode == want) {
+                PostMessageA(g_pill_hwnd, WM_TIMER, 2, 0); // trigger advance
+            }
+        }
+    }
+    return CallNextHookEx(g_pill_kbd_hook, code, wp, lp);
+}
+
+static void start_native_pill(const std::string& scriptJson, const std::string& product) {
+    g_pill_steps.clear();
+    g_pill_idx = 0;
+    g_pill_product = product;
+    g_pill_bounce_at = 0;
+
+    // Always prepend a loading step (matches the web-island behaviour).
+    PillStep loading;
+    loading.kind    = "loading";
+    loading.text    = "Injecting " + (product.empty() ? std::string("product") : product);
+    loading.timeout = 2.4;
+    g_pill_steps.push_back(loading);
+
+    parse_pill_steps(scriptJson, g_pill_steps);
+    if (g_pill_steps.size() == 1) {
+        // Nothing but loading — add a graceful close
+        PillStep c; c.kind = "close"; c.text = "Done"; c.timeout = 2.0;
+        g_pill_steps.push_back(c);
+    }
+
+    std::thread([]() {
+        Gdiplus::GdiplusStartupInput gsi;
+        Gdiplus::GdiplusStartup(&g_gdip_token, &gsi, NULL);
+
+        WNDCLASSEXA wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = pill_wndproc;
+        wc.hInstance     = GetModuleHandleA(NULL);
+        wc.lpszClassName = "YullyPill";
+        wc.hCursor       = LoadCursorA(NULL, IDC_HAND);
+        RegisterClassExA(&wc);
+
+        // Auto-size width to fit longest step text (approx).
+        int maxLen = 0;
+        for (auto& s : g_pill_steps) if ((int)s.text.size() > maxLen) maxLen = (int)s.text.size();
+        g_pill_w = std::max(280, std::min(720, 120 + maxLen * 8));
+        g_pill_h = 60;
+
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x  = (sw - g_pill_w) / 2;
+        int y  = sh - g_pill_h - 90;
+
+        g_pill_hwnd = CreateWindowExA(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            "YullyPill", "YullyPill",
+            WS_POPUP,
+            x, y, g_pill_w, g_pill_h,
+            NULL, NULL, GetModuleHandleA(NULL), NULL);
+
+        if (!g_pill_hwnd) {
+            std::cerr << "[pill] CreateWindowExA failed err=" << GetLastError() << std::endl;
+            return;
+        }
+
+        ShowWindow(g_pill_hwnd, SW_SHOWNOACTIVATE);
+        draw_pill_frame(g_pill_hwnd);
+
+        // Global keyboard listener for step keybinds (game may be foreground).
+        g_pill_kbd_hook = SetWindowsHookExA(WH_KEYBOARD_LL, pill_kbd_hook,
+                                            GetModuleHandleA(NULL), 0);
+
+        MSG msg;
+        while (GetMessage(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        if (g_pill_kbd_hook) UnhookWindowsHookEx(g_pill_kbd_hook);
+        Gdiplus::GdiplusShutdown(g_gdip_token);
+        g_pill_hwnd = NULL;
+
+        std::cout << "[pill] window closed, tearing down loader" << std::endl;
+        extern HANDLE g_kill_switch_job;
+        if (g_kill_switch_job) { CloseHandle(g_kill_switch_job); g_kill_switch_job = NULL; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        ExitProcess(0);
+    }).detach();
+}
+
 /* ========== Command handler ========== */
 static void handle_command(const std::string& payload) {
     std::string type = extract_str(payload, "type");
@@ -1291,219 +1692,31 @@ static void handle_command(const std::string& payload) {
     if (type == "welcome") return;
 
     if (type == "island") {
-        // Dashboard has finished orchestrating a launch. Kill the current
-        // kiosk browser (that was the dashboard) and open a tiny, topmost,
-        // borderless Chrome window pointing at /island — a standalone
-        // dynamic-island page that plays the script and calls window.close
-        // + POSTs shutdown when it's done.
+        // Dashboard finished orchestrating a launch. Kill the dashboard
+        // browser and hand off to a NATIVE GDI+ overlay pill painted by
+        // this process — no browser, no chrome, no frame. Just a rounded
+        // translucent black pill layered onto the desktop via WS_POPUP +
+        // WS_EX_LAYERED, always on top, click-to-bounce, keybind-to-advance.
         extern HANDLE g_browser_process;
         extern DWORD  g_browser_pid;
-        extern std::string g_api_host;
-        extern int         g_api_port;
-        extern bool        g_api_https;
 
         std::string scriptJson = extract_array(payload, "script");
         std::string product    = extract_str(payload, "product");
         if (product.empty()) product = "product";
         if (scriptJson.empty()) scriptJson = "[]";
 
-        // Percent-encode the JSON so it survives the URL.
-        auto pctEncode = [](const std::string& in) {
-            static const char* hex = "0123456789ABCDEF";
-            std::string out; out.reserve(in.size() * 3);
-            for (unsigned char c : in) {
-                if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-                    (c >= 'a' && c <= 'z') || c == '-' || c == '_' || c == '.' || c == '~') {
-                    out.push_back((char)c);
-                } else {
-                    out.push_back('%');
-                    out.push_back(hex[c >> 4]);
-                    out.push_back(hex[c & 0xF]);
-                }
-            }
-            return out;
-        };
-
-        std::string scheme = g_api_https ? "https://" : "http://";
-        std::string url = scheme + g_api_host;
-        if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80)) {
-            url += ":" + std::to_string(g_api_port);
-        }
-        url += "/island?script=" + pctEncode(scriptJson) + "&product=" + pctEncode(product);
-
-        // Kill the current dashboard browser first.
-        HANDLE oldBrowser = g_browser_process;
-        DWORD  oldPid     = g_browser_pid;
-        g_browser_process = NULL;
-        g_browser_pid     = 0;
-
-        struct BrowserSpec { const char* path; const char* privateFlag; };
-        BrowserSpec browsers[] = {
-            {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",         "--incognito"},
-            {"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",   "--incognito"},
-            {"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  "--inprivate"},
-            {"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",        "--inprivate"},
-            {nullptr, nullptr}
-        };
-
-        // Bottom-center placement. We spawn the window OVERSIZED by
-        // TITLE_BAR_H on the top so we can clip that band away with a
-        // window region and hide Chrome's title bar entirely. Client area
-        // (which starts below the title bar) then aligns exactly to the
-        // visible clip region.
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        const int PW = 560;
-        const int PH = 130;
-        const int TITLE_BAR_H = 40;
-        int px = (sw - PW) / 2;
-        // Bottom-anchored: the VISIBLE bottom edge sits 80px above the
-        // screen bottom.
-        int py = sh - (PH + TITLE_BAR_H) - 80;
-        int ww = PW;
-        int wh = PH + TITLE_BAR_H;
-
-        char tempDir[MAX_PATH];
-        GetTempPathA(MAX_PATH, tempDir);
-        std::string dataDir = std::string(tempDir) + "yh_pill_" + g_loader_id.substr(0, 8);
-        CreateDirectoryA(dataDir.c_str(), NULL);
-
-        bool spawned = false;
-        for (int i = 0; browsers[i].path; i++) {
-            if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
-            std::string cmd = std::string("\"") + browsers[i].path + "\""
-                            + " " + browsers[i].privateFlag
-                            + " --user-data-dir=\"" + dataDir + "\""
-                            + " --no-first-run --no-default-browser-check"
-                            + " --disable-features=Translate,MediaRouter"
-                            + " --window-size=" + std::to_string(ww) + "," + std::to_string(wh)
-                            + " --window-position=" + std::to_string(px) + "," + std::to_string(py)
-                            + " --app=\"" + url + "\"";
-            STARTUPINFOA si{}; si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_SHOWNORMAL;
-            PROCESS_INFORMATION pi{};
-            if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
-                               DETACHED_PROCESS,
-                               NULL, NULL, &si, &pi)) {
-                CloseHandle(pi.hThread);
-                g_browser_process = pi.hProcess;
-                g_browser_pid     = pi.dwProcessId;
-                std::cout << "[loader] pill window spawned pid=" << pi.dwProcessId << std::endl;
-                spawned = true;
-
-                // Try to strip the title bar + set topmost after the window
-                // is up. Runs on a helper thread so we don't block.
-                DWORD targetPid = pi.dwProcessId;
-                int wx = px, wy = py;
-                int wnd_w = ww, wnd_h = wh;
-                int tbh = TITLE_BAR_H;
-                std::thread([targetPid, wx, wy, wnd_w, wnd_h, tbh]() {
-                    // Find the browser's main top-level window. Chrome creates
-                    // many child/helper HWNDs; we want the ONE with class
-                    // "Chrome_WidgetWin_1", no parent, non-zero size, and a
-                    // window title (the /island page sets document.title).
-                    auto findMainWnd = [](DWORD pid) -> HWND {
-                        struct Data { DWORD pid; HWND result; RECT bestRc; } d = { pid, NULL, {0,0,0,0} };
-                        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
-                            Data* dd = (Data*)lp;
-                            DWORD wpid = 0;
-                            GetWindowThreadProcessId(h, &wpid);
-                            if (wpid != dd->pid) return TRUE;
-                            if (!IsWindowVisible(h)) return TRUE;
-                            if (GetParent(h) != NULL) return TRUE;
-                            char cls[64] = {0};
-                            GetClassNameA(h, cls, 64);
-                            if (strcmp(cls, "Chrome_WidgetWin_1") != 0) return TRUE;
-                            RECT r;
-                            if (!GetWindowRect(h, &r)) return TRUE;
-                            int w = r.right - r.left, ht = r.bottom - r.top;
-                            if (w < 200 || ht < 50) return TRUE;
-                            // Pick the largest visible top-level match — main
-                            // window beats DevTools split, tooltips, etc.
-                            int cw = dd->bestRc.right - dd->bestRc.left;
-                            int cht = dd->bestRc.bottom - dd->bestRc.top;
-                            if (w * ht > cw * cht) { dd->result = h; dd->bestRc = r; }
-                            return TRUE;
-                        }, (LPARAM)&d);
-                        return d.result;
-                    };
-
-                    HWND found = NULL;
-                    for (int tries = 0; tries < 80; ++tries) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        found = findMainWnd(targetPid);
-                        if (found) break;
-                    }
-                    if (!found) {
-                        std::cerr << "[loader] pill window HWND not found" << std::endl;
-                        return;
-                    }
-
-                    // Apply borderless + topmost + a window region that
-                    // clips the top title-bar band away entirely. Chrome
-                    // may still paint the title bar internally, but the
-                    // region prevents it from rendering to screen. Client
-                    // area (which starts BELOW the title bar) is exactly
-                    // what stays visible. Chrome re-normalises styles
-                    // during its early paint phases so we hammer this
-                    // over the first second.
-                    auto restyle = [&](HWND h) {
-                        LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
-                        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
-                                   WS_MAXIMIZEBOX | WS_SYSMENU | WS_DLGFRAME | WS_BORDER);
-                        style |= WS_POPUP;
-                        SetWindowLongPtrA(h, GWL_STYLE, style);
-
-                        LONG_PTR ex = GetWindowLongPtrA(h, GWL_EXSTYLE);
-                        ex |= (WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
-                        ex &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
-                        SetWindowLongPtrA(h, GWL_EXSTYLE, ex);
-
-                        // Clip the title bar off: region covers y=[tbh..wnd_h]
-                        // with rounded corners at the bottom. Everything
-                        // above y=tbh (including whatever Chrome paints as
-                        // its title bar) is invisible.
-                        HRGN rgn = CreateRoundRectRgn(0, tbh, wnd_w, wnd_h, 24, 24);
-                        SetWindowRgn(h, rgn, TRUE);
-
-                        SetWindowPos(h, HWND_TOPMOST, wx, wy, wnd_w, wnd_h,
-                                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
-                    };
-
-                    for (int i = 0; i < 8; i++) {
-                        restyle(found);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-                    }
-                    std::cout << "[loader] pill window styled borderless + topmost + clipped" << std::endl;
-                }).detach();
-
-                // When the pill window closes (user clicked, script ended,
-                // whatever), tear the whole session down.
-                HANDLE watch = pi.hProcess;
-                std::thread([watch]() {
-                    WaitForSingleObject(watch, INFINITE);
-                    std::cout << "[loader] pill closed, shutting down" << std::endl;
-                    extern HANDLE g_kill_switch_job;
-                    if (g_kill_switch_job) { CloseHandle(g_kill_switch_job); g_kill_switch_job = NULL; }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-                    ExitProcess(0);
-                }).detach();
-                break;
-            }
-        }
-        if (!spawned) {
-            std::cerr << "[loader] failed to spawn pill browser" << std::endl;
+        // Kill the dashboard browser first so nothing else covers the pill.
+        if (g_browser_process) {
+            TerminateProcess(g_browser_process, 0);
+            CloseHandle(g_browser_process);
+            g_browser_process = NULL;
+            g_browser_pid = 0;
         }
 
-        // Kill the OLD dashboard browser only after the new one is up.
-        if (oldBrowser) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-            TerminateProcess(oldBrowser, 0);
-            CloseHandle(oldBrowser);
-        }
+        start_native_pill(scriptJson, product);
         return;
     }
+
 
     if (type == "shutdown") {
         std::cout << "[loader] shutdown requested — closing browser + self" << std::endl;
