@@ -1628,7 +1628,11 @@ static void poll_session() {
             std::string payload = c;
             std::thread([payload]() { handle_command(payload); }).detach();
         }
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        // 500ms poll — fast fallback for when the direct 127.0.0.1 path is
+        // blocked by the browser's Local Network Access permission. Still
+        // subject to Vercel serverless instance isolation but at least the
+        // "did the button do anything?" gap is bounded to sub-second.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
 
