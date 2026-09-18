@@ -1,116 +1,59 @@
 import { NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
+import {
+    getProduct, updateProduct, deleteProduct, safeId,
+} from '../../../../lib/product-store.js';
 
-const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
-
-function safeId(id) {
-    return /^[a-f0-9]{6,32}$/.test(id) ? id : null;
-}
-
-async function readMeta(dir) {
-    return JSON.parse(await fs.readFile(path.join(dir, 'meta.json'), 'utf8'));
-}
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(_request, { params }) {
     const id = safeId(params.id);
     if (!id) return NextResponse.json({ error: 'bad id' }, { status: 400 });
-    try {
-        const meta = await readMeta(path.join(UPLOAD_ROOT, id));
-        return NextResponse.json(meta);
-    } catch {
-        return NextResponse.json({ error: 'not found' }, { status: 404 });
-    }
+    const meta = await getProduct(id);
+    if (!meta) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    return NextResponse.json(meta);
 }
 
 export async function DELETE(_request, { params }) {
     const id = safeId(params.id);
     if (!id) return NextResponse.json({ error: 'bad id' }, { status: 400 });
-    const dir = path.join(UPLOAD_ROOT, id);
-    await fs.rm(dir, { recursive: true, force: true });
+    await deleteProduct(id);
     return NextResponse.json({ ok: true });
 }
 
-// PUT — update an existing product. Any of {exe, image, title} can be sent;
-// omitted fields keep their current value. This mutates in place so the
-// product ID and its /api/products/<id>/exe URL stay the same, meaning any
-// loader that already knows the URL gets the new bytes on the next launch
-// (no cache — the exe route already sends `Cache-Control: no-store`).
 export async function PUT(request, { params }) {
     const id = safeId(params.id);
     if (!id) return NextResponse.json({ error: 'bad id' }, { status: 400 });
-
-    const dir = path.join(UPLOAD_ROOT, id);
-    let meta;
-    try {
-        meta = await readMeta(dir);
-    } catch {
-        return NextResponse.json({ error: 'not found' }, { status: 404 });
-    }
-
     const form = await request.formData();
-    const exe   = form.get('exe');
-    const image = form.get('image');
-    const title = (form.get('title') || '').toString().trim();
 
-    // Replace exe bytes
-    if (exe && typeof exe !== 'string' && exe.size > 0) {
-        const buf = Buffer.from(await exe.arrayBuffer());
-        await fs.writeFile(path.join(dir, 'app.exe'), buf);
-        meta.exeName = exe.name || meta.exeName || 'app.exe';
-        meta.exeSize = buf.length;
-    }
-
-    // Replace image
-    if (image && typeof image !== 'string' && image.size > 0) {
-        // Clear any old image (any extension)
-        const files = await fs.readdir(dir);
-        for (const f of files) {
-            if (f.startsWith('image.')) {
-                await fs.unlink(path.join(dir, f)).catch(() => {});
-            }
-        }
-        const iname = image.name || 'image';
-        const ext = iname.includes('.') ? iname.slice(iname.lastIndexOf('.')) : '.png';
-        const buf = Buffer.from(await image.arrayBuffer());
-        await fs.writeFile(path.join(dir, 'image' + ext), buf);
-        meta.imageName = 'image' + ext;
-        meta.imageMime = image.type || meta.imageMime || 'image/png';
-    }
-
-    // Rename
-    if (title) meta.title = title;
-
-    // Script — an ordered list of steps the Dynamic Island plays back
-    // once the payload has finished loading. Each step:
-    //   {
-    //     text:       string        — text to show inside the pill
-    //     dismiss:    'timeout' | 'keybind' | 'both'
-    //     timeout?:   number (seconds)   — how long to wait (if any)
-    //     keybind?:   string             — global key to advance on (e.g. "F2")
-    //     kind?:      'message' | 'close'  — 'close' collapses the pill
-    //   }
+    let script;
     const scriptRaw = form.get('script');
     if (scriptRaw != null) {
         try {
             const parsed = typeof scriptRaw === 'string' ? JSON.parse(scriptRaw) : scriptRaw;
-            if (Array.isArray(parsed)) {
-                meta.script = parsed;
-            }
+            if (Array.isArray(parsed)) script = parsed;
         } catch (e) {
             return NextResponse.json({ error: 'bad script JSON: ' + e.message }, { status: 400 });
         }
     }
 
-    // Per-product visibility toggle. When true, the loader spawns the
-    // product with SW_HIDE + CREATE_NO_WINDOW so nothing appears on screen.
+    let hideWindow;
     const hideRaw = form.get('hideWindow');
     if (hideRaw != null) {
-        meta.hideWindow = (String(hideRaw) === 'true' || String(hideRaw) === '1');
+        hideWindow = (String(hideRaw) === 'true' || String(hideRaw) === '1');
     }
 
-    meta.updatedAt = Date.now();
-    await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
-
-    return NextResponse.json(meta);
+    try {
+        const meta = await updateProduct(id, {
+            exe:   form.get('exe'),
+            image: form.get('image'),
+            title: (form.get('title') || '').toString(),
+            script,
+            hideWindow,
+        });
+        return NextResponse.json(meta);
+    } catch (e) {
+        const notFound = /not found/i.test(e.message || '');
+        return NextResponse.json({ error: e.message || 'update failed' }, { status: notFound ? 404 : 400 });
+    }
 }
