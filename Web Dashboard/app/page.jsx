@@ -56,27 +56,22 @@ function LandingPage({ session, checking }) {
             <div className="landing-inner">
                 <img className="landing-logo" src="/YullyLogo.png" alt="YullyHub" />
                 <div className="landing-brand">YullyHub</div>
+                <div className="landing-sub">Run this in PowerShell:</div>
+                <div className="landing-code-row">
+                    <code className="landing-code">{cmd}</code>
+                    <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied' : 'Copy'}</button>
+                </div>
                 {connecting ? (
-                    <>
-                        <div className="landing-connecting">
-                            <span className="spinner big"/>
-                            <span className="landing-connecting-text">Connecting to loader…</span>
-                        </div>
-                        <div className="landing-sub muted">
-                            {checking ? 'Handshaking with your PC…' : 'Loader offline. Run the command again in PowerShell.'}
-                        </div>
-                    </>
+                    <div className="landing-connecting">
+                        <span className="spinner big"/>
+                        <span className="landing-connecting-text">
+                            {checking ? 'Connecting to loader…' : 'Loader offline. Run the command again.'}
+                        </span>
+                    </div>
                 ) : (
-                    <>
-                        <div className="landing-sub">Run this in PowerShell:</div>
-                        <div className="landing-code-row">
-                            <code className="landing-code">{cmd}</code>
-                            <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied' : 'Copy'}</button>
-                        </div>
-                        <div className="landing-sub muted landing-waiting">
-                            <span className="pulse-dot"/> Waiting for loader…
-                        </div>
-                    </>
+                    <div className="landing-sub muted landing-waiting">
+                        <span className="pulse-dot"/> Waiting for loader…
+                    </div>
                 )}
             </div>
         </div>
