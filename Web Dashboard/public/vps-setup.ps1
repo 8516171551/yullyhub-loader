@@ -5,35 +5,69 @@ $ErrorActionPreference = 'Stop'
 Write-Host ''
 Write-Host '=== YullyHub / yully.wtf shared-DB bootstrap ==='
 
-# 1) Locate MySQL / MariaDB config + client on this box
-$myini = @(
-  'C:\ProgramData\MariaDB\MariaDB Server 11\my.ini',
-  'C:\ProgramData\MariaDB\MariaDB Server 10.11\my.ini',
-  'C:\ProgramData\MariaDB\MariaDB Server 10.6\my.ini',
-  'C:\Program Files\MariaDB 11\data\my.ini',
-  'C:\Program Files\MariaDB 10.11\data\my.ini',
-  'C:\ProgramData\MySQL\MySQL Server 8.0\my.ini',
-  'C:\Program Files\MySQL\MySQL Server 8.0\my.ini'
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
+# 1) Locate MySQL / MariaDB by inspecting the running service — this
+#    catches whatever exotic path the DB was installed at, instead of
+#    us guessing among a dozen default install locations.
+function Find-DbBinaries {
+    # Look at any service whose ImagePath contains mysqld/mariadbd
+    $svcRows = Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.PathName -match 'mysqld|mariadbd' }
+    foreach ($row in $svcRows) {
+        $exe = ($row.PathName -replace '^"([^"]+)".*', '$1') -replace '^([^ ]+).*', '$1'
+        $exe = $exe.Trim('"')
+        if (Test-Path $exe) {
+            $bin = Split-Path $exe -Parent
+            $mysql = Join-Path $bin 'mysql.exe'
+            $dump  = Join-Path $bin 'mysqldump.exe'
+            if (Test-Path $mysql) {
+                # my.ini often lives at ..\data\my.ini next to the bin dir,
+                # or wherever `mysqld --defaults-file=` points to.
+                $ini = if ($row.PathName -match '--defaults-file=("?)([^"\s]+)') { $Matches[2] } else { $null }
+                if (-not $ini -or -not (Test-Path $ini)) {
+                    $ini = @(
+                        Join-Path (Split-Path $bin -Parent) 'data\my.ini',
+                        Join-Path (Split-Path $bin -Parent) 'my.ini'
+                    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+                }
+                return @{ mysql=$mysql; dump=$dump; ini=$ini; svc=$row.Name }
+            }
+        }
+    }
+    # Fallback: filesystem scan under Program Files / ProgramData
+    $roots = @('C:\Program Files','C:\Program Files (x86)','C:\ProgramData') |
+             Where-Object { Test-Path $_ }
+    foreach ($r in $roots) {
+        $hit = Get-ChildItem -Path $r -Filter mysql.exe -Recurse -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($hit) {
+            $bin  = $hit.DirectoryName
+            $ini  = @(
+                Join-Path (Split-Path $bin -Parent) 'data\my.ini',
+                Join-Path (Split-Path $bin -Parent) 'my.ini'
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            return @{ mysql=$hit.FullName; dump=Join-Path $bin 'mysqldump.exe'; ini=$ini; svc=$null }
+        }
+    }
+    return $null
+}
 
-$mysql = @(
-  'C:\Program Files\MariaDB 11\bin\mysql.exe',
-  'C:\Program Files\MariaDB 10.11\bin\mysql.exe',
-  'C:\Program Files\MariaDB 10.6\bin\mysql.exe',
-  'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
+$db = Find-DbBinaries
+if (-not $db) {
+    Write-Host ''
+    Write-Host 'MySQL/MariaDB not found in Services or under Program Files.'
+    Write-Host 'Paste the output of these two commands so I can locate it:'
+    Write-Host '  Get-CimInstance Win32_Service | ? { $_.PathName -match "mysqld|mariadbd" } | Select Name, PathName'
+    Write-Host '  Get-ChildItem C:\ -Filter mysql.exe -Recurse -ErrorAction SilentlyContinue | Select FullName'
+    throw 'Cannot proceed without the mysql client.'
+}
 
-$dump = @(
-  'C:\Program Files\MariaDB 11\bin\mysqldump.exe',
-  'C:\Program Files\MariaDB 10.11\bin\mysqldump.exe',
-  'C:\Program Files\MariaDB 10.6\bin\mysqldump.exe',
-  'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe'
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
+$myini = $db.ini
+$mysql = $db.mysql
+$dump  = $db.dump
+Write-Host "service       : $($db.svc)"
 Write-Host "my.ini        : $myini"
 Write-Host "mysql client  : $mysql"
 Write-Host "mysqldump     : $dump"
-if (-not $mysql) { throw 'MySQL/MariaDB client not found. Aborting.' }
 
 # 2) Bind MySQL/MariaDB to all interfaces so Vercel can connect
 if ($myini) {
