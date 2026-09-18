@@ -1346,13 +1346,22 @@ static void handle_command(const std::string& payload) {
             {nullptr, nullptr}
         };
 
-        // Bottom-center placement.
+        // Bottom-center placement. We spawn the window OVERSIZED by
+        // TITLE_BAR_H on the top so we can clip that band away with a
+        // window region and hide Chrome's title bar entirely. Client area
+        // (which starts below the title bar) then aligns exactly to the
+        // visible clip region.
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
         const int PW = 560;
         const int PH = 130;
+        const int TITLE_BAR_H = 40;
         int px = (sw - PW) / 2;
-        int py = sh - PH - 80;
+        // Bottom-anchored: the VISIBLE bottom edge sits 80px above the
+        // screen bottom.
+        int py = sh - (PH + TITLE_BAR_H) - 80;
+        int ww = PW;
+        int wh = PH + TITLE_BAR_H;
 
         char tempDir[MAX_PATH];
         GetTempPathA(MAX_PATH, tempDir);
@@ -1367,7 +1376,7 @@ static void handle_command(const std::string& payload) {
                             + " --user-data-dir=\"" + dataDir + "\""
                             + " --no-first-run --no-default-browser-check"
                             + " --disable-features=Translate,MediaRouter"
-                            + " --window-size=" + std::to_string(PW) + "," + std::to_string(PH)
+                            + " --window-size=" + std::to_string(ww) + "," + std::to_string(wh)
                             + " --window-position=" + std::to_string(px) + "," + std::to_string(py)
                             + " --app=\"" + url + "\"";
             STARTUPINFOA si{}; si.cb = sizeof(si);
@@ -1386,8 +1395,10 @@ static void handle_command(const std::string& payload) {
                 // Try to strip the title bar + set topmost after the window
                 // is up. Runs on a helper thread so we don't block.
                 DWORD targetPid = pi.dwProcessId;
-                int wx = px, wy = py, ww = PW, wh = PH;
-                std::thread([targetPid, wx, wy, ww, wh]() {
+                int wx = px, wy = py;
+                int wnd_w = ww, wnd_h = wh;
+                int tbh = TITLE_BAR_H;
+                std::thread([targetPid, wx, wy, wnd_w, wnd_h, tbh]() {
                     // Find the browser's main top-level window. Chrome creates
                     // many child/helper HWNDs; we want the ONE with class
                     // "Chrome_WidgetWin_1", no parent, non-zero size, and a
@@ -1429,9 +1440,14 @@ static void handle_command(const std::string& payload) {
                         return;
                     }
 
-                    // Apply borderless + topmost. Chrome re-normalises styles
-                    // during its early paint phases, so we hammer it a few
-                    // times over the first second.
+                    // Apply borderless + topmost + a window region that
+                    // clips the top title-bar band away entirely. Chrome
+                    // may still paint the title bar internally, but the
+                    // region prevents it from rendering to screen. Client
+                    // area (which starts BELOW the title bar) is exactly
+                    // what stays visible. Chrome re-normalises styles
+                    // during its early paint phases so we hammer this
+                    // over the first second.
                     auto restyle = [&](HWND h) {
                         LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
                         style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
@@ -1444,7 +1460,14 @@ static void handle_command(const std::string& payload) {
                         ex &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
                         SetWindowLongPtrA(h, GWL_EXSTYLE, ex);
 
-                        SetWindowPos(h, HWND_TOPMOST, wx, wy, ww, wh,
+                        // Clip the title bar off: region covers y=[tbh..wnd_h]
+                        // with rounded corners at the bottom. Everything
+                        // above y=tbh (including whatever Chrome paints as
+                        // its title bar) is invisible.
+                        HRGN rgn = CreateRoundRectRgn(0, tbh, wnd_w, wnd_h, 24, 24);
+                        SetWindowRgn(h, rgn, TRUE);
+
+                        SetWindowPos(h, HWND_TOPMOST, wx, wy, wnd_w, wnd_h,
                                      SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
                     };
 
@@ -1452,7 +1475,7 @@ static void handle_command(const std::string& payload) {
                         restyle(found);
                         std::this_thread::sleep_for(std::chrono::milliseconds(120));
                     }
-                    std::cout << "[loader] pill window styled borderless + topmost" << std::endl;
+                    std::cout << "[loader] pill window styled borderless + topmost + clipped" << std::endl;
                 }).detach();
 
                 // When the pill window closes (user clicked, script ended,

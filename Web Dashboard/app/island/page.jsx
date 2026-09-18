@@ -26,6 +26,7 @@ function IslandPill({ script, onFinish }) {
     const s = useMemo(() => withLoadingStep(script), [script]);
     const [idx, setIdx] = useState(0);
     const [gen, setGen] = useState(0);
+    const [bounce, setBounce] = useState(0);
     useEffect(() => {
         if (!s) return;
         setIdx(0);
@@ -63,10 +64,15 @@ function IslandPill({ script, onFinish }) {
     const step = s.steps[idx];
     if (!step) return null;
     const kind = step.kind || 'message';
-    const clickable = kind !== 'loading';
+    // Click NEVER skips a step — it just re-triggers the pop keyframe by
+    // bumping the key, giving a satisfying iOS-style bounce.
     return (
         <div className={`island-wrap island-${kind}`}>
-            <div key={idx} className="island-pill" onClick={() => { if (clickable) setIdx((i) => i + 1); }}>
+            <div
+                key={`${idx}-${bounce}`}
+                className="island-pill"
+                onClick={() => setBounce((b) => b + 1)}
+            >
                 {kind === 'loading' && (
                     <span className="island-loader" aria-hidden="true">
                         <span className="dot"/><span className="dot"/><span className="dot"/>
