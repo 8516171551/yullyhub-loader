@@ -1189,8 +1189,62 @@ static HWND        g_pill_hwnd          = NULL;
 static ULONGLONG   g_pill_step_started  = 0;
 static ULONGLONG   g_pill_bounce_at     = 0;
 static ULONG_PTR   g_gdip_token         = 0;
-static int         g_pill_w             = 380;
-static int         g_pill_h             = 60;
+static int         g_pill_w             = 420;
+static int         g_pill_h             = 74;
+static Gdiplus::PrivateFontCollection* g_poppins_coll = nullptr;
+static bool        g_poppins_loaded     = false;
+
+// Download Poppins TTFs from our own /Poppins-*.ttf endpoints and add
+// them to a GDI+ PrivateFontCollection so we can render the pill with
+// the same typeface as the web dashboard. Cached to %TEMP% between
+// launches so subsequent sessions start instantly.
+static bool http_download_bytes(const std::string& url, std::vector<unsigned char>& out);
+
+static void load_poppins() {
+    if (g_poppins_loaded) return;
+    g_poppins_coll = new Gdiplus::PrivateFontCollection();
+    extern std::string g_api_host;
+    extern int         g_api_port;
+    extern bool        g_api_https;
+    std::string scheme = g_api_https ? "https://" : "http://";
+    std::string base = scheme + g_api_host;
+    if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80))
+        base += ":" + std::to_string(g_api_port);
+
+    auto grab = [&](const std::string& name) {
+        char tempDir[MAX_PATH]; GetTempPathA(MAX_PATH, tempDir);
+        std::string path = std::string(tempDir) + "yh_" + name;
+        // Prefer cache
+        FILE* f = fopen(path.c_str(), "rb");
+        std::vector<unsigned char> bytes;
+        if (f) {
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+            bytes.resize(sz);
+            fread(bytes.data(), 1, sz, f);
+            fclose(f);
+        } else {
+            if (!http_download_bytes(base + "/" + name, bytes) || bytes.empty()) return;
+            FILE* wf = fopen(path.c_str(), "wb");
+            if (wf) { fwrite(bytes.data(), 1, bytes.size(), wf); fclose(wf); }
+        }
+        g_poppins_coll->AddMemoryFont(bytes.data(), (INT)bytes.size());
+        std::cout << "[pill] font loaded: " << name << " (" << bytes.size() << " bytes)" << std::endl;
+    };
+    grab("Poppins-Regular.ttf");
+    grab("Poppins-SemiBold.ttf");
+    g_poppins_loaded = true;
+}
+
+// Build a Poppins Font, falling back to Segoe UI if the collection is
+// empty (network was down and no cache).
+static Gdiplus::Font* make_font(float sizePx, bool semibold) {
+    using namespace Gdiplus;
+    if (g_poppins_coll) {
+        return new Font(L"Poppins", sizePx, semibold ? FontStyleBold : FontStyleRegular,
+                        UnitPixel, g_poppins_coll);
+    }
+    return new Font(L"Segoe UI", sizePx, semibold ? FontStyleBold : FontStyleRegular, UnitPixel);
+}
 
 // Parse a numeric field from a JSON object substring — falls back to `def`
 // if key isn't present or isn't a number.
@@ -1364,46 +1418,52 @@ static void draw_pill_frame(HWND hwnd) {
             contentX += 28;
         }
 
-        // Text
+        // Text — Poppins SemiBold if available (falls back to Segoe UI Bold)
         std::wstring wtext = to_wide(step.text.empty() ? std::string(step.kind == "close" ? "Click to close" : "") : step.text);
-        Font        font(L"Segoe UI", 12.5f, FontStyleRegular, UnitPixel);
+        Font*       font = make_font(14.5f, true);
         SolidBrush  textBrush(Color(255, 245, 245, 247));
         StringFormat fmt;
         fmt.SetAlignment(StringAlignmentNear);
         fmt.SetLineAlignment(StringAlignmentCenter);
+        fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+        fmt.SetTrimming(StringTrimmingEllipsisCharacter);
 
-        // Keybind chip
-        int textRight = px + pw - 12;
+        // Keybind chip on the right edge
+        int textRight = px + pw - 16;
         if ((step.dismiss == "keybind" || step.dismiss == "both") && !step.keybind.empty()) {
             std::wstring kw = to_wide(step.keybind);
-            Font        kfont(L"Consolas", 11.0f, FontStyleBold, UnitPixel);
-            SolidBrush  kbBg(Color(48, 255, 255, 255));
+            Font*       kfont = make_font(12.5f, true);
+            SolidBrush  kbBg(Color(56, 255, 255, 255));
             SolidBrush  kbFg(Color(255, 245, 245, 247));
             RectF meas;
-            g.MeasureString(kw.c_str(), -1, &kfont, PointF(0, 0), &meas);
-            int chipW = (int)meas.Width + 14;
-            int chipH = ph - 22;
+            g.MeasureString(kw.c_str(), -1, kfont, PointF(0, 0), &meas);
+            int chipW = std::max((int)meas.Width + 18, 36);
+            int chipH = ph - 26;
             int chipX = textRight - chipW;
             int chipY = py + (ph - chipH) / 2;
             GraphicsPath cp;
-            int cr = 4;
+            int cr = 5;
             cp.AddArc(chipX,               chipY, cr*2, cr*2, 180, 90);
             cp.AddArc(chipX + chipW - cr*2, chipY, cr*2, cr*2, 270, 90);
             cp.AddArc(chipX + chipW - cr*2, chipY + chipH - cr*2, cr*2, cr*2, 0, 90);
             cp.AddArc(chipX,               chipY + chipH - cr*2, cr*2, cr*2, 90, 90);
             cp.CloseFigure();
             g.FillPath(&kbBg, &cp);
+            Pen chipBorder(Color(64, 255, 255, 255), 1.0f);
+            g.DrawPath(&chipBorder, &cp);
             RectF kr((REAL)chipX, (REAL)chipY, (REAL)chipW, (REAL)chipH);
             StringFormat kfmt;
             kfmt.SetAlignment(StringAlignmentCenter);
             kfmt.SetLineAlignment(StringAlignmentCenter);
-            g.DrawString(kw.c_str(), -1, &kfont, kr, &kfmt, &kbFg);
-            textRight = chipX - 8;
+            g.DrawString(kw.c_str(), -1, kfont, kr, &kfmt, &kbFg);
+            delete kfont;
+            textRight = chipX - 12;
         }
 
         int textW = textRight - contentX;
         RectF trect((REAL)contentX, (REAL)contentY, (REAL)textW, (REAL)contentH);
-        g.DrawString(wtext.c_str(), -1, &font, trect, &fmt, &textBrush);
+        g.DrawString(wtext.c_str(), -1, font, trect, &fmt, &textBrush);
+        delete font;
     }
 
     // Composite onto the desktop.
@@ -1429,23 +1489,40 @@ static void pill_advance() {
     }
     g_pill_step_started = GetTickCount64();
     KillTimer(g_pill_hwnd, 2);
-    UINT ms = (UINT)(g_pill_steps[g_pill_idx].timeout * 1000);
-    if (ms < 300) ms = 300;
+    const PillStep& step = g_pill_steps[g_pill_idx];
+    UINT ms = (UINT)(step.timeout * 1000);
+    // Keybind-only steps don't time out unless they set one.
+    if (step.dismiss == "keybind" && ms == 0) ms = 60000;
+    if (ms < 800) ms = 800;   // never flash a step so fast it can't be read
     SetTimer(g_pill_hwnd, 2, ms, NULL);
+    std::cout << "[pill] step " << g_pill_idx << "/" << g_pill_steps.size()
+              << " kind=" << step.kind
+              << " text=\"" << step.text << "\""
+              << " timeout=" << step.timeout << "s"
+              << " dismiss=" << step.dismiss
+              << " keybind=" << step.keybind
+              << std::endl;
     draw_pill_frame(g_pill_hwnd);
 }
 
 static LRESULT CALLBACK pill_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-        case WM_CREATE:
+        case WM_CREATE: {
             g_pill_step_started = GetTickCount64();
             SetTimer(hwnd, 1, 16, NULL);
             if (!g_pill_steps.empty()) {
-                UINT ms = (UINT)(g_pill_steps[0].timeout * 1000);
-                if (ms < 300) ms = 300;
+                const PillStep& step = g_pill_steps[0];
+                UINT ms = (UINT)(step.timeout * 1000);
+                if (step.dismiss == "keybind" && ms == 0) ms = 60000;
+                if (ms < 800) ms = 800;
                 SetTimer(hwnd, 2, ms, NULL);
+                std::cout << "[pill] step 0/" << g_pill_steps.size()
+                          << " kind=" << step.kind
+                          << " text=\"" << step.text << "\""
+                          << " timeout=" << step.timeout << "s" << std::endl;
             }
             return 0;
+        }
         case WM_TIMER:
             if (wp == 1) draw_pill_frame(hwnd);
             else if (wp == 2) pill_advance();
@@ -1505,6 +1582,17 @@ static void start_native_pill(const std::string& scriptJson, const std::string& 
     std::thread([]() {
         Gdiplus::GdiplusStartupInput gsi;
         Gdiplus::GdiplusStartup(&g_gdip_token, &gsi, NULL);
+        load_poppins();
+
+        std::cout << "[pill] parsed " << g_pill_steps.size() << " steps:" << std::endl;
+        for (size_t i = 0; i < g_pill_steps.size(); i++) {
+            const auto& s = g_pill_steps[i];
+            std::cout << "  [" << i << "] kind=" << s.kind
+                      << " text=\"" << s.text << "\""
+                      << " timeout=" << s.timeout << "s"
+                      << " dismiss=" << s.dismiss
+                      << " keybind=" << s.keybind << std::endl;
+        }
 
         WNDCLASSEXA wc = {};
         wc.cbSize        = sizeof(wc);
@@ -1517,8 +1605,8 @@ static void start_native_pill(const std::string& scriptJson, const std::string& 
         // Auto-size width to fit longest step text (approx).
         int maxLen = 0;
         for (auto& s : g_pill_steps) if ((int)s.text.size() > maxLen) maxLen = (int)s.text.size();
-        g_pill_w = std::max(280, std::min(720, 120 + maxLen * 8));
-        g_pill_h = 60;
+        g_pill_w = std::max(340, std::min(760, 150 + maxLen * 9));
+        g_pill_h = 74;
 
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
