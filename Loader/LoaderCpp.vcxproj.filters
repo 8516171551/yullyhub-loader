@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Headers">
+      <UniqueIdentifier>{2A5D0C10-DE01-4C29-9CDE-1A16B5F8B901}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx</Extensions>
+    </Filter>
+    <Filter Include="Source">
+      <UniqueIdentifier>{9BB68B03-30E3-4E7C-8AA8-71C9C3A9E802}</UniqueIdentifier>
+      <Extensions>cpp;c;cxx;cc</Extensions>
+    </Filter>
+    <Filter Include="Source\Core">
+      <UniqueIdentifier>{FE39FCB0-33A2-4CCA-BC6D-F0D0F9D7BA03}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Crypto">
+      <UniqueIdentifier>{5C5C7A9A-1A22-4E14-9F5E-4E4C5B6E7A04}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Protect">
+      <UniqueIdentifier>{6D6D8B8B-1B33-4F25-AA6F-5F5D6C7F8B05}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Net">
+      <UniqueIdentifier>{7E7E9C9C-1C44-5036-BB70-606E7D8F9C06}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Launcher">
+      <UniqueIdentifier>{8F8FADAD-1D55-5147-CC81-707F8E9FAD07}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="include\pch.h">      <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\config.h">   <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\strings.h">  <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\crypto.h">   <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\protect.h">  <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\http.h">     <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\json.h">     <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\control.h">  <Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="include\launcher.h"> <Filter>Headers</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">     <Filter>Source\Core</Filter></ClCompile>
+    <ClCompile Include="src\crypto.cpp">   <Filter>Source\Crypto</Filter></ClCompile>
+    <ClCompile Include="src\protect.cpp">  <Filter>Source\Protect</Filter></ClCompile>
+    <ClCompile Include="src\http.cpp">     <Filter>Source\Net</Filter></ClCompile>
+    <ClCompile Include="src\json.cpp">     <Filter>Source\Net</Filter></ClCompile>
+    <ClCompile Include="src\control.cpp">  <Filter>Source\Net</Filter></ClCompile>
+    <ClCompile Include="src\launcher.cpp"> <Filter>Source\Launcher</Filter></ClCompile>
+  </ItemGroup>
+</Project>
