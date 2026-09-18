@@ -174,10 +174,15 @@ async function uniqueSlug(base, excludeId) {
     let n = 0;
     while (true) {
         const candidate = n === 0 ? s : `${s}-${n}`;
-        const row = await q1(
-            `SELECT id FROM products WHERE slug = ? AND id <> ? LIMIT 1`,
-            [candidate, excludeId || '']
-        );
+        const row = excludeId
+            ? await q1(
+                `SELECT id FROM products WHERE slug = ? AND id <> ? LIMIT 1`,
+                [candidate, excludeId]
+              )
+            : await q1(
+                `SELECT id FROM products WHERE slug = ? LIMIT 1`,
+                [candidate]
+              );
         if (!row) return candidate;
         n += 1;
         if (n > 500) return `${s}-${crypto.randomBytes(3).toString('hex')}`;
@@ -193,17 +198,18 @@ export async function saveProduct(meta) {
         `INSERT INTO products
             (id, slug, name, description, image_url, exe_pathname, exe_url,
              exe_size_bytes, hide_window, active, price_cents, launch_script)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
-         ON DUPLICATE KEY UPDATE
-            slug           = VALUES(slug),
-            name           = VALUES(name),
-            description    = VALUES(description),
-            image_url      = VALUES(image_url),
-            exe_pathname   = VALUES(exe_pathname),
-            exe_url        = VALUES(exe_url),
-            exe_size_bytes = VALUES(exe_size_bytes),
-            hide_window    = VALUES(hide_window),
-            launch_script  = VALUES(launch_script)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+         ON CONFLICT (id) DO UPDATE SET
+            slug           = EXCLUDED.slug,
+            name           = EXCLUDED.name,
+            description    = EXCLUDED.description,
+            image_url      = EXCLUDED.image_url,
+            exe_pathname   = EXCLUDED.exe_pathname,
+            exe_url        = EXCLUDED.exe_url,
+            exe_size_bytes = EXCLUDED.exe_size_bytes,
+            hide_window    = EXCLUDED.hide_window,
+            launch_script  = EXCLUDED.launch_script,
+            updated_at     = NOW()`,
         [
             meta.id,
             slug,
@@ -213,8 +219,8 @@ export async function saveProduct(meta) {
             meta.exePathname || null,
             meta.exeUrl || null,
             Number(meta.exeSize || 0),
-            meta.hideWindow ? 1 : 0,
-            meta.active === false ? 0 : 1,
+            !!meta.hideWindow,
+            meta.active !== false,
             Number(meta.priceCents || 0),
             JSON.stringify(script),
         ]

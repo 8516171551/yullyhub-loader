@@ -44,10 +44,10 @@ export async function POST(request) {
     if (!KEY_RE.test(key)) return fail('invalid_key_format');
 
     const lic = await q1(
-        `SELECT \`key\`, active, blacklisted_at, expires_at, activated_at,
+        `SELECT "key", active, blacklisted_at, expires_at, activated_at,
                 duration_days, tier, hwid, ip_lock, max_devices,
                 redeemed_by_user_id
-         FROM licenses WHERE \`key\` = ?`,
+         FROM licenses WHERE "key" = ?`,
         [key]
     );
     if (!lic) return fail('key_not_found', 404);
@@ -68,7 +68,7 @@ export async function POST(request) {
         await q(
             `UPDATE licenses
                 SET activated_at = ?, expires_at = COALESCE(expires_at, ?), hwid = COALESCE(hwid, ?)
-              WHERE \`key\` = ? AND activated_at IS NULL`,
+              WHERE "key" = ? AND activated_at IS NULL`,
             [now, expiresAt, hwid, key]
         );
         lic.activated_at = now;

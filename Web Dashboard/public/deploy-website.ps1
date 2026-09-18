@@ -1,4 +1,4 @@
-# yully.wtf VPS deploy - pulls latest from GitHub, installs deps, restarts pm2.
+# yully.wtf VPS deploy — pulls latest from GitHub, installs deps, restarts pm2.
 # Run on the VPS (RDP as Administrator, PowerShell):
 #   irm https://yullyhub.com/deploy-website.ps1 | iex
 #
@@ -35,7 +35,7 @@ if ([int]$nodeVer -lt $NodeMin) {
 }
 Write-Host "node.js       : v$(node -v)"
 
-# 2) pm2 (process manager - runs Next.js as a Windows service that survives reboots)
+# 2) pm2 (process manager — runs Next.js as a Windows service that survives reboots)
 if (-not (Test-CommandExists pm2)) {
     Write-Host 'Installing pm2 globally...'
     npm install -g pm2 --silent 2>$null
@@ -46,9 +46,9 @@ Write-Host "pm2           : $((pm2 -v).Trim())"
 
 # 3) git (auto-install via winget if missing)
 if (-not (Test-CommandExists git)) {
-    Write-Host 'git not installed - installing via winget...'
+    Write-Host 'git not installed — installing via winget...'
     winget install --id Git.Git -e --source winget --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
-    # winget doesn't refresh PATH for the current session - reload it.
+    # winget doesn't refresh PATH for the current session — reload it.
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                 [System.Environment]::GetEnvironmentVariable('Path','User')
     if (-not (Test-CommandExists git)) {
@@ -59,7 +59,7 @@ Write-Host "git           : $(((git --version) -split ' ')[-1])"
 
 # 4) Clone or pull
 if (-not (Test-Path $AppDir)) {
-    Write-Host "Cloning $RepoUrl -> $AppDir"
+    Write-Host "Cloning $RepoUrl → $AppDir"
     git clone $RepoUrl $AppDir 2>&1 | Out-Host
 } else {
     Write-Host "Pulling latest into $AppDir"
@@ -69,10 +69,10 @@ if (-not (Test-Path $AppDir)) {
     Pop-Location
 }
 
-# 5) Ensure .env exists - merge in only the keys the new unified schema needs.
+# 5) Ensure .env exists — merge in only the keys the new unified schema needs.
 #    Preserves whatever secrets are already on the VPS from before the migration
 #    (Discord/Stripe/Resend/Admin/DB legacy vars). This script never bakes
-#    secrets into itself - the ps1 is publicly downloadable.
+#    secrets into itself — the ps1 is publicly downloadable.
 #    Also seeds from a legacy .env elsewhere on the box on first run.
 $envPath = Join-Path $AppDir '.env'
 $existing = @{}
@@ -125,7 +125,7 @@ foreach ($k in $defaults.Keys) {
         $existing[$k] = $defaults[$k]
     }
 }
-# DATABASE_URL - always FORCE the local VPS URL. Any inherited value pointing
+# DATABASE_URL — always FORCE the local VPS URL. Any inherited value pointing
 # at the public IP (yullyhub@217.154...) is wrong on this box: local Node
 # should hit MySQL over localhost with the `yully` user, not hop through the
 # public firewall as the yullyhub user.
@@ -133,7 +133,7 @@ if ($existing['DATABASE_URL'] -notmatch 'localhost|127\.0\.0\.1') {
     Write-Host "override      : DATABASE_URL was '$($existing['DATABASE_URL'])' -> forcing localhost"
     $existing['DATABASE_URL'] = $defaults['DATABASE_URL']
 }
-# SESSION_SECRET - must be present AND non-trivial. Regenerate if missing,
+# SESSION_SECRET — must be present AND non-trivial. Regenerate if missing,
 # blank, or shorter than 32 chars (dev placeholders like "changeme").
 $secret = $existing['SESSION_SECRET']
 if (-not $secret -or $secret.Length -lt 32) {
@@ -183,8 +183,8 @@ foreach ($p in @($AppPort, 80, 443)) {
     }
 }
 
-# 9) Caddy - reverse proxy on 443 with auto-TLS via Let's Encrypt.
-#    Publishes yully.wtf -> 127.0.0.1:$AppPort. Runs as a Windows service that
+# 9) Caddy — reverse proxy on 443 with auto-TLS via Let's Encrypt.
+#    Publishes yully.wtf → 127.0.0.1:$AppPort. Runs as a Windows service that
 #    survives reboots. Free, one-time setup, zero cert-rotation work.
 if (-not (Test-CommandExists caddy)) {
     Write-Host 'Installing Caddy via winget...'
@@ -200,7 +200,7 @@ if (Test-CommandExists caddy) {
     $caddyFile = Join-Path $caddyDir 'Caddyfile'
     New-Item -ItemType Directory -Path $caddyDir -Force | Out-Null
     $caddyfileContent = @"
-# yully.wtf reverse proxy - auto-managed HTTPS via Let's Encrypt.
+# yully.wtf reverse proxy — auto-managed HTTPS via Let's Encrypt.
 {
     admin off
     email admin@fbo.foundation
@@ -225,8 +225,8 @@ yully.wtf, www.yully.wtf {
     Set-Content -Path $caddyFile -Value $caddyfileContent -Encoding ASCII
     Write-Host "caddyfile     : $caddyFile"
 
-    # Install Caddy as a Windows service (via nssm - Caddy has no native
-    # Windows service installer). Use pm2 to daemonize it instead - one
+    # Install Caddy as a Windows service (via nssm — Caddy has no native
+    # Windows service installer). Use pm2 to daemonize it instead — one
     # process manager, one convention.
     $caddyPmName = 'caddy-yully'
     $isCaddyUp = (pm2 list 2>$null | Out-String) -match [regex]::Escape($caddyPmName)
@@ -239,7 +239,7 @@ yully.wtf, www.yully.wtf {
     }
     pm2 save 2>&1 | Out-Null
 } else {
-    Write-Host "WARN: caddy install failed. Set up your own reverse proxy from :443 -> 127.0.0.1:$AppPort"
+    Write-Host 'WARN: caddy install failed. Set up your own reverse proxy from :443 → 127.0.0.1:' + $AppPort
 }
 
 # 10) Health checks
@@ -248,13 +248,13 @@ try {
     $r = Invoke-WebRequest -Uri "http://127.0.0.1:$AppPort/" -UseBasicParsing -TimeoutSec 5
     Write-Host "local  http   : $($r.StatusCode) on :$AppPort"
 } catch {
-    Write-Host "local  http   : FAILED - check 'pm2 logs $AppName'"
+    Write-Host "local  http   : FAILED — check 'pm2 logs $AppName'"
 }
 try {
     $r = Invoke-WebRequest -Uri 'https://yully.wtf/' -UseBasicParsing -TimeoutSec 15 -SkipCertificateCheck
     Write-Host "public https  : $($r.StatusCode) on yully.wtf"
 } catch {
-    Write-Host "public https  : not yet - Caddy needs ~30-60s on first run to fetch the cert. Retry https://yully.wtf/ shortly."
+    Write-Host "public https  : not yet — Caddy needs ~30-60s on first run to fetch the cert. Retry https://yully.wtf/ shortly."
 }
 
 Write-Host ''

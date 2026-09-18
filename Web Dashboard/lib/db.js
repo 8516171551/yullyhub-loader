@@ -1,53 +1,50 @@
-// Shared MySQL pool.
+// Neon Postgres client — serverless HTTP driver, no pool required.
 //
-// yullyhub.com and yully.wtf share ONE MySQL database (yully) under the
-// unified schema (see migrations/2026-09-18-unified-schema.sql and the
-// _readme row id=1 in the DB for ownership rules).
+// Shared with yully.wtf. Schema owned in migrations/schema.pg.sql;
+// see the `_readme` row (id=1) for ownership rules.
 //
-// The DATABASE_URL points at the shared VPS (mysql://yullyhub:...@ip:3306/yully).
-// yully.wtf uses mysql://yully:yully@localhost:3306/yully.
+// Query helpers:
+//   q(sql, params)  → rows array
+//   q1(sql, params) → first row or null
+//
+// Placeholder shim: existing code base was written for mysql2 with `?`
+// placeholders. To avoid touching every route, `?` in SQL is auto-rewritten
+// to `$1, $2, ...` before it hits Postgres. New code can use `$N` directly.
 
-import mysql from 'mysql2/promise';
+import { neon } from '@neondatabase/serverless';
 
 const DB_URL = process.env.DATABASE_URL || '';
+export function hasDb() { return !!DB_URL; }
 
-let pool = null;
-let poolPromise = null;
-
-function makePool() {
-    if (!DB_URL) throw new Error('DATABASE_URL not set');
-    // Parse mysql://user:pass@host:port/db
-    const u = new URL(DB_URL);
-    return mysql.createPool({
-        host: u.hostname,
-        port: Number(u.port || 3306),
-        user: decodeURIComponent(u.username),
-        password: decodeURIComponent(u.password),
-        database: u.pathname.replace(/^\//, ''),
-        connectionLimit: 5,
-        connectTimeout: 8000,
-        enableKeepAlive: true,
-        keepAliveInitialDelay: 10000,
-        multipleStatements: false,
-        charset: 'utf8mb4',
-    });
+let _sql = null;
+function client() {
+    if (!_sql) {
+        if (!DB_URL) throw new Error('DATABASE_URL not set');
+        _sql = neon(DB_URL);
+    }
+    return _sql;
 }
 
-export function getPool() {
-    if (pool) return pool;
-    if (!DB_URL) return null;
-    if (!poolPromise) {
-        try { pool = makePool(); poolPromise = Promise.resolve(pool); }
-        catch (e) { poolPromise = Promise.reject(e); }
+function convertPlaceholders(sql) {
+    // Replace unquoted `?` with $1, $2, ... Any `?` inside a single-quoted
+    // string literal is preserved. This is the same rewrite pattern
+    // pg-promise uses when adapting mysql-style code.
+    let i = 0, out = '', inStr = false, prev = '';
+    for (const ch of sql) {
+        if (ch === "'" && prev !== '\\') inStr = !inStr;
+        if (ch === '?' && !inStr) { i += 1; out += '$' + i; }
+        else out += ch;
+        prev = ch;
     }
-    return pool;
+    return out;
 }
 
 export async function q(sql, params = []) {
-    const p = getPool();
-    if (!p) throw new Error('No DB pool (DATABASE_URL missing)');
-    const [rows] = await p.execute(sql, params);
-    return rows;
+    const c = client();
+    const rewritten = convertPlaceholders(sql);
+    // neon() returns rows directly.
+    const rows = await c.query(rewritten, params);
+    return rows.rows ?? rows;
 }
 
 export async function q1(sql, params = []) {
@@ -55,6 +52,5 @@ export async function q1(sql, params = []) {
     return rows[0] || null;
 }
 
-export function hasDb() {
-    return !!DB_URL;
-}
+// Kept for legacy imports that expected a pool-shaped object. No-op.
+export function getPool() { return client(); }

@@ -64,10 +64,10 @@ export async function findUserById(userId) {
 export async function getLicense(key) {
     if (!hasDb() || !key) return null;
     return await q1(
-        `SELECT \`key\`, product_id, tier, duration_days, reseller_id,
+        `SELECT "key", product_id, tier, duration_days, reseller_id,
                 redeemed_by_user_id, activated_at, expires_at, hwid,
                 ip_lock, max_devices, active, blacklisted_at
-           FROM licenses WHERE \`key\` = ? LIMIT 1`,
+           FROM licenses WHERE "key" = ? LIMIT 1`,
         [key]
     );
 }

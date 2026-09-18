@@ -72,7 +72,7 @@ export async function POST(request) {
             await q(
                 `UPDATE licenses
                     SET redeemed_by_user_id = ?
-                  WHERE \`key\` = ? AND redeemed_by_user_id IS NULL`,
+                  WHERE "key" = ? AND redeemed_by_user_id IS NULL`,
                 [user.id, key]
             );
         }

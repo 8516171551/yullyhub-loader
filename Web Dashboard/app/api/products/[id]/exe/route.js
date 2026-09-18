@@ -18,7 +18,7 @@ async function gate(request) {
             `SELECT s.session_token, s.revoked_at, s.license_key,
                     l.active, l.blacklisted_at, l.expires_at
                FROM loader_sessions s
-          LEFT JOIN licenses l ON l.\`key\` = s.license_key
+          LEFT JOIN licenses l ON l."key" = s.license_key
               WHERE s.session_token = ?`,
             [m[1]]
         );

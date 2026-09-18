@@ -8,6 +8,9 @@
     "build": "next build"
   },
   "dependencies": {
+    "@neon/config": "^1.7.2",
+    "@neon/env": "^1.4.3",
+    "@neondatabase/serverless": "^1.1.0",
     "@upstash/redis": "^1.38.4",
     "@vercel/blob": "^2.8.0",
     "bcryptjs": "^3.0.3",

@@ -50,7 +50,7 @@ export async function POST(request) {
                     l.blacklisted_at,
                     l.expires_at
              FROM loader_sessions s
-             LEFT JOIN licenses l ON l.\`key\` = s.license_key
+             LEFT JOIN licenses l ON l."key" = s.license_key
              WHERE s.session_token = ?`,
             [token]
         );

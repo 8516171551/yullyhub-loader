@@ -23,7 +23,7 @@ export async function GET(request) {
     }
 
     const row = await q1(
-        `SELECT UNIX_TIMESTAMP(MAX(last_seen_at)) AS last_seen
+        `SELECT EXTRACT(EPOCH FROM MAX(last_seen_at))::bigint AS last_seen
            FROM loader_sessions
           WHERE loader_id = ? AND revoked_at IS NULL`,
         [id]
