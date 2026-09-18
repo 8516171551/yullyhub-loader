@@ -19,11 +19,11 @@ export async function POST(request) {
     if (!body || !body.command || !body.command.type) {
         return NextResponse.json({ error: 'missing command' }, { status: 400 });
     }
-    const res = push(body.loaderId || null, body.command);
+    const res = await push(body.loaderId || null, body.command);
     return NextResponse.json({
         ok: true,
         broadcast: res.broadcast,
         delivered: res.delivered,
-        online: onlineLoaders().length,
+        online: (await onlineLoaders()).length,
     });
 }

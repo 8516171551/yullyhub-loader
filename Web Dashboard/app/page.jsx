@@ -180,12 +180,15 @@ export default function Page() {
 
     // All commands go through Vercel's queue. Loader polls /api/loader/poll
     // every 500ms and drains. No direct 127.0.0.1 → no Local Network Access
-    // dialog, no device permission required.
+    // dialog, no device permission required. We MUST tag every command with
+    // the loaderId (the ?session= URL param) so it lands in that specific
+    // loader's queue — without it, push() would broadcast, which fails
+    // when the online-seen state has drifted across serverless instances.
     const sendCommand = async (payload) => {
         try {
             const r = await fetch('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({ ...payload, loaderId: session }),
             });
             return await r.json();
         } catch (e) { pushEvent('send failed: ' + e.message, 'bad'); return null; }
@@ -398,7 +401,7 @@ export default function Page() {
         try {
             await fetch('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'shutdown' }),
+                body: JSON.stringify({ type: 'shutdown', loaderId: session }),
             });
         } catch {}
         try { window.close(); } catch {}

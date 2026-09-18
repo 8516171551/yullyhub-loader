@@ -21,9 +21,9 @@ export async function GET(request) {
     const ua  = request.headers.get('user-agent') || '';
     if (!id) return NextResponse.json({ error: 'no id' }, { status: 400 });
 
-    markSeen(id, { ua });
-    const commands = drain(id);
-    const online = onlineLoaders();
+    await markSeen(id, { ua });
+    const commands = await drain(id);
+    const online = await onlineLoaders();
 
     return NextResponse.json({
         state: { online: online.length > 0, count: online.length, agents: online },

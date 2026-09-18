@@ -17,15 +17,16 @@ export async function POST(request) {
     if (!body || !body.type) {
         return NextResponse.json({ error: 'missing type' }, { status: 400 });
     }
-    const res = push(body.loaderId || null, body);
+    const res = await push(body.loaderId || null, body);
+    const online = await onlineLoaders();
     return NextResponse.json({
         ok: true,
         broadcast: res.broadcast,
         delivered: res.delivered,
-        online: onlineLoaders().length,
+        online: online.length,
     });
 }
 
 export async function GET() {
-    return NextResponse.json({ online: onlineLoaders() });
+    return NextResponse.json({ online: await onlineLoaders() });
 }
