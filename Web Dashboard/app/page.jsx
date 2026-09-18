@@ -3,28 +3,75 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 
 // ---------- Landing page (session gate) ----------
+// Three states:
+//   1. No session in URL, no online loader yet
+//        → show the `irm ... | iex` command + Copy button, poll every
+//          500ms for a loader to come online.
+//   2. Online loader detected (or session in URL)
+//        → show "Connecting to loader…" with a spinner, keep polling
+//          status until it flips online.
+//   3. Loader connected → parent transitions us out to the dashboard.
 function LandingPage({ session, checking }) {
     const cmd = 'irm https://yullyhub.com/loader | iex';
     const [copied, setCopied] = useState(false);
     const doCopy = async () => {
         try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
     };
+
+    // Auto-detect a newly-online loader when the visitor is sitting on the
+    // landing page without a session URL. As soon as one shows up we
+    // redirect to /?session=<id> which the outer component then handles.
+    useEffect(() => {
+        if (session) return;
+        if (typeof window === 'undefined') return;
+        let alive = true;
+        const poll = async () => {
+            try {
+                const r = await fetch('/api/loader/latest', { cache: 'no-store' });
+                if (!alive) return;
+                if (r.ok) {
+                    const j = await r.json();
+                    if (j.id) {
+                        const u = new URL(window.location.href);
+                        u.searchParams.set('session', j.id);
+                        window.location.replace(u.toString());
+                    }
+                }
+            } catch {}
+        };
+        poll();
+        const iv = setInterval(poll, 700);
+        return () => { alive = false; clearInterval(iv); };
+    }, [session]);
+
+    const connecting = !!session;
     return (
         <div className="landing">
             <div className="landing-inner">
                 <img className="landing-logo" src="/YullyLogo.png" alt="YullyHub" />
                 <div className="landing-brand">YullyHub</div>
-                <div className="landing-sub">
-                    {session
-                        ? checking
-                            ? 'Waiting for loader…'
-                            : 'Loader not connected. Run the command in PowerShell.'
-                        : 'Open PowerShell and run:'}
-                </div>
-                <div className="landing-code-row">
-                    <code className="landing-code">{cmd}</code>
-                    <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied' : 'Copy'}</button>
-                </div>
+                {connecting ? (
+                    <>
+                        <div className="landing-connecting">
+                            <span className="spinner big"/>
+                            <span className="landing-connecting-text">Connecting to loader…</span>
+                        </div>
+                        <div className="landing-sub muted">
+                            {checking ? 'Handshaking with your PC…' : 'Loader offline. Run the command again in PowerShell.'}
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        <div className="landing-sub">Run this in PowerShell:</div>
+                        <div className="landing-code-row">
+                            <code className="landing-code">{cmd}</code>
+                            <button className="landing-copy" onClick={doCopy}>{copied ? 'Copied' : 'Copy'}</button>
+                        </div>
+                        <div className="landing-sub muted landing-waiting">
+                            <span className="pulse-dot"/> Waiting for loader…
+                        </div>
+                    </>
+                )}
             </div>
         </div>
     );

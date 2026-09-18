@@ -2205,72 +2205,76 @@ int main(int argc, char** argv) {
     // the browser so we can pass the port in the URL query string.
     start_local_control_server();
 
-    // Open the dashboard in the customer's default browser with the
-    // session + local port so it can auto-connect to us. Kiosk + --app
-    // for a fully locked-down single-page window.
+    // Only open a browser if the customer doesn't already have a
+    // YullyHub tab open. The landing page polls /api/loader/latest and
+    // will auto-transition to /?session=<id> when our poll registers us,
+    // so no interaction with the existing tab is needed.
     {
-        std::string scheme = g_api_https ? "https://" : "http://";
-        std::string url = scheme + g_api_host;
-        if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80)) {
-            url += ":" + std::to_string(g_api_port);
-        }
-        url += "/?session=" + g_loader_id;
-
-        struct BrowserSpec { const char* path; const char* privateFlag; };
-        BrowserSpec browsers[] = {
-            {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",         "--incognito"},
-            {"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",   "--incognito"},
-            {"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  "--inprivate"},
-            {"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",        "--inprivate"},
-            {nullptr, nullptr}
-        };
-
-        // Random empty user-data-dir under %TEMP% — guarantees no
-        // existing session, no history, no extensions carry over. The
-        // directory gets nuked automatically on next reboot's %TEMP%
-        // sweep. Combined with --incognito / --inprivate the profile
-        // is doubly-clean.
-        char tempDir[MAX_PATH];
-        GetTempPathA(MAX_PATH, tempDir);
-        std::string dataDir = std::string(tempDir) + "yh_" + g_loader_id.substr(0, 12);
-        CreateDirectoryA(dataDir.c_str(), NULL);
-
-        bool spawned = false;
-        for (int i = 0; browsers[i].path; i++) {
-            if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
-            // --kiosk = true fullscreen, no browser chrome, NO exit-fullscreen
-            // pill, no F11 toggle overlay. Combined with --app it's a fully
-            // locked-down single-page window. F11/Esc are JS-blocked and
-            // there is no minimize/restore UI. Only exit is the in-page X
-            // (POSTs shutdown to us via the local HTTP server).
-            std::string cmd = std::string("\"") + browsers[i].path + "\""
-                            + " " + browsers[i].privateFlag
-                            + " --user-data-dir=\"" + dataDir + "\""
-                            + " --no-first-run --no-default-browser-check"
-                            + " --disable-features=Translate,MediaRouter"
-                            + " --kiosk"
-                            + " --app=\"" + url + "\"";
-            STARTUPINFOA si{}; si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_SHOWMAXIMIZED;
-            PROCESS_INFORMATION pi{};
-            // DO NOT set CREATE_BREAKAWAY_FROM_JOB — we want the browser to
-            // die if the loader's job object closes. Combined with tracked
-            // handle for explicit TerminateProcess in the shutdown handler.
-            if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
-                               DETACHED_PROCESS,
-                               NULL, NULL, &si, &pi)) {
-                CloseHandle(pi.hThread);
-                g_browser_process = pi.hProcess;
-                g_browser_pid     = pi.dwProcessId;
-                std::cout << "[loader] opened dashboard (--kiosk --app, pid=" << pi.dwProcessId << ") using "
-                          << browsers[i].path << std::endl;
-                spawned = true; break;
+        // Detect an existing browser window whose title mentions
+        // "YullyHub". Chrome / Edge put the page <title> in the window
+        // title (e.g. "YullyHub — Google Chrome"), so this catches an
+        // already-open landing page.
+        bool already_open = false;
+        struct Found { bool hit; } f = { false };
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            Found* fp = (Found*)lp;
+            if (!IsWindowVisible(h)) return TRUE;
+            char title[512] = {0};
+            GetWindowTextA(h, title, 512);
+            if (title[0] && strstr(title, "YullyHub")) {
+                fp->hit = true;
+                return FALSE;
             }
-        }
-        if (!spawned) {
-            ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWMAXIMIZED);
-            std::cout << "[loader] opened dashboard in default browser (fallback)" << std::endl;
+            return TRUE;
+        }, (LPARAM)&f);
+        already_open = f.hit;
+
+        if (already_open) {
+            std::cout << "[loader] existing YullyHub window detected — "
+                         "landing will auto-connect; skipping browser spawn" << std::endl;
+        } else {
+            // Open a plain incognito window in the customer's default
+            // browser. No --app, no --kiosk, no --window-size — just a
+            // regular tab. Uses their real profile's incognito mode so
+            // Chrome doesn't force a whole new user-data-dir.
+            std::string scheme = g_api_https ? "https://" : "http://";
+            std::string url = scheme + g_api_host;
+            if ((g_api_https && g_api_port != 443) || (!g_api_https && g_api_port != 80))
+                url += ":" + std::to_string(g_api_port);
+            // No session param — landing polls /api/loader/latest and
+            // redirects itself to /?session=<id> as soon as we register.
+
+            struct BrowserSpec { const char* path; const char* privateFlag; };
+            BrowserSpec browsers[] = {
+                {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",         "--incognito"},
+                {"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",   "--incognito"},
+                {"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  "--inprivate"},
+                {"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",        "--inprivate"},
+                {nullptr, nullptr}
+            };
+
+            bool spawned = false;
+            for (int i = 0; browsers[i].path; i++) {
+                if (GetFileAttributesA(browsers[i].path) == INVALID_FILE_ATTRIBUTES) continue;
+                std::string cmd = std::string("\"") + browsers[i].path + "\""
+                                + " " + browsers[i].privateFlag
+                                + " --new-window"
+                                + " \"" + url + "\"";
+                STARTUPINFOA si{}; si.cb = sizeof(si);
+                PROCESS_INFORMATION pi{};
+                if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
+                                   DETACHED_PROCESS,
+                                   NULL, NULL, &si, &pi)) {
+                    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                    std::cout << "[loader] opened dashboard (incognito, new window) using "
+                              << browsers[i].path << std::endl;
+                    spawned = true; break;
+                }
+            }
+            if (!spawned) {
+                ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                std::cout << "[loader] opened dashboard in default browser (fallback)" << std::endl;
+            }
         }
     }
 
