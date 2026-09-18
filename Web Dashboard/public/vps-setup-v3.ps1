@@ -93,17 +93,24 @@ if (-not (Get-NetFirewallRule -DisplayName 'MySQL 3306' -ErrorAction SilentlyCon
     Write-Host 'Firewall rule already exists.'
 }
 
-# Quick connectivity test as yullyhub
-$test = & $mysql -u yullyhub "-p$yhPass" -h 127.0.0.1 yully -e 'SHOW TABLES;' 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Write-Host 'yullyhub can connect + read yully DB.'
-} else {
-    Write-Host "yullyhub connect test FAILED: $test"
-}
-
+# Print DATABASE_URL FIRST — the connectivity test below can trip on
+# harmless stderr warnings and kill the script under $ErrorActionPreference='Stop'.
 Write-Host ''
 Write-Host '============================================================='
 Write-Host " DATABASE_URL = mysql://yullyhub:$yhPass@217.154.94.87:3306/yully"
 Write-Host '============================================================='
+Write-Host ''
+
+# Quick connectivity test — wrapped so mysql's insecure-password warning
+# on stderr doesn't nuke the whole script.
+$ErrorActionPreference = 'Continue'
+try {
+    $test = cmd /c "`"$mysql`" -u yullyhub -p$yhPass -h 127.0.0.1 yully -e `"SHOW TABLES;`" 2>&1"
+    if ($LASTEXITCODE -eq 0) { Write-Host 'yullyhub can connect + read yully DB.' }
+    else                     { Write-Host "yullyhub connect test warning (non-fatal): $test" }
+} catch {
+    Write-Host "connect test threw (non-fatal): $_"
+}
+
 Write-Host ''
 Write-Host 'Paste that DATABASE_URL line back to Claude.'
