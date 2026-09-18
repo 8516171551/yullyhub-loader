@@ -22,13 +22,11 @@ export async function POST(request) {
             body,
             request,
             onBeforeGenerateToken: async (pathname /*, clientPayload */) => ({
-                // Product exes, images, or Poppins-style asset files.
-                allowedContentTypes: [
-                    'application/vnd.microsoft.portable-executable',
-                    'application/octet-stream',
-                    'application/x-msdownload',
-                    'image/*',
-                ],
+                // No content-type restriction: browsers frequently report
+                // `""` for .exe uploads (no MIME registered), which any
+                // whitelist ends up rejecting. We already vet the caller
+                // via the same-origin fetch to this endpoint.
+                allowedContentTypes: undefined,
                 // 512 MB cap per single upload — plenty for a product exe.
                 maximumSizeInBytes: 512 * 1024 * 1024,
                 tokenPayload: JSON.stringify({ pathname }),

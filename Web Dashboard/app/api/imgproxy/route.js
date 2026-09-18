@@ -15,14 +15,16 @@ import { NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ALLOWED_HOSTS = new Set([
-    'cdn.cloudflare.steamstatic.com',
-    'shared.akamai.steamstatic.com',
-    'shared.cloudflare.steamstatic.com',
-    'steamcdn-a.akamaihd.net',
-    'community.cloudflare.steamstatic.com',
-    'steamuserimages-a.akamaihd.net',
-]);
+// Any host under Valve's / Steam's CDN infrastructure. Regex-based so
+// we cover the sprawling assortment they use (cdn.akamai.steamstatic.com,
+// shared.cloudflare.steamstatic.com, steamcdn-a.akamaihd.net,
+// steamuserimages-a.akamaihd.net, community.*.steamstatic.com, etc.)
+const HOST_ALLOWLIST = [
+    /(^|\.)steamstatic\.com$/i,
+    /(^|\.)steampowered\.com$/i,
+    /(^|\.)steamcontent\.com$/i,
+    /(^|\.)akamaihd\.net$/i,          // steamcdn-a.akamaihd.net, steamuserimages-a.akamaihd.net
+];
 
 export async function GET(request) {
     const u = new URL(request.url);
@@ -31,11 +33,26 @@ export async function GET(request) {
     let src;
     try { src = new URL(target); } catch { return NextResponse.json({ error: 'bad url' }, { status: 400 }); }
     if (src.protocol !== 'https:') return NextResponse.json({ error: 'https only' }, { status: 400 });
-    if (!ALLOWED_HOSTS.has(src.hostname)) {
-        return NextResponse.json({ error: 'host not allowed' }, { status: 400 });
+    if (!HOST_ALLOWLIST.some((rx) => rx.test(src.hostname))) {
+        return NextResponse.json({ error: 'host not allowed: ' + src.hostname }, { status: 400 });
     }
     try {
         const r = await fetch(src.toString(), { headers: { 'User-Agent': 'YullyHub/1.0' } });
+        if (r.status === 404) {
+            // Missing asset — many games don't publish every variant.
+            // Return a tiny transparent PNG instead of a 502 so the
+            // browser doesn't render a broken-image icon.
+            const transparent = Buffer.from(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+                'base64');
+            return new NextResponse(transparent, {
+                headers: {
+                    'Content-Type': 'image/png',
+                    'Cache-Control': 'public, max-age=86400',
+                    'Access-Control-Allow-Origin': '*',
+                },
+            });
+        }
         if (!r.ok) return NextResponse.json({ error: 'upstream ' + r.status }, { status: 502 });
         const ct = r.headers.get('content-type') || 'application/octet-stream';
         const buf = await r.arrayBuffer();
