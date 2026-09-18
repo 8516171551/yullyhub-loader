@@ -260,11 +260,15 @@ export default function Page() {
         if (selectedId && !list.find(p => p.id === selectedId) && list.length > 0) setSelectedId(list[0].id);
     }, [list, selectedId]);
 
-    // Launch flow — pure API. Dashboard dispatches launch + island commands
-    // to /api/command. The loader polls, downloads the product, kills THIS
-    // browser window, and opens a small standalone /island window at the
-    // bottom of the screen. From that point the dashboard is out of play.
+    // Launch flow — pure API. Dashboard POSTs a `launch` command; the
+    // loader downloads the product and spawns it (SW_HIDE if the product's
+    // hideWindow flag is set). The loader keeps running with the
+    // PowerShell console hidden and heartbeats /api/auth/heartbeat every
+    // 30s to enforce the subscription — if the sub expires it hard-kills
+    // the product and itself. Dashboard transitions to a "product active"
+    // handover screen the user can close whenever.
     const [launching, setLaunching] = useState(false);
+    const [launched,  setLaunched]  = useState(null); // { name } once running
     const handleStart = async () => {
         if (!selected) return;
         const target = selected;
@@ -273,46 +277,27 @@ export default function Page() {
         const productName = target.name || target.title || 'product';
 
         const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
-        const [tokenRes, scriptRes] = await Promise.all([
-            (async () => {
-                try {
-                    const r = await fetch('/api/auth/exchange', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
-                    });
-                    if (r.ok) { const j = await r.json(); return j.token; }
-                } catch {}
-                return null;
-            })(),
-            (async () => {
-                let latest = Array.isArray(target.script) ? target.script : null;
-                try {
-                    const r = await fetch(`/api/products/${target.id}`);
-                    if (r.ok) { const fresh = await r.json(); if (Array.isArray(fresh.script)) latest = fresh.script; }
-                } catch {}
-                return latest;
-            })(),
-        ]);
-        if (tokenRes) pushEvent(`auth: token ${tokenRes.slice(0,8)}…`, 'ok');
+        let token = null;
+        try {
+            const r = await fetch('/api/auth/exchange', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
+            });
+            if (r.ok) { const j = await r.json(); token = j.token; pushEvent(`auth: token ${token.slice(0,8)}…`, 'ok'); }
+        } catch {}
 
-        const scriptSteps = Array.isArray(scriptRes) && scriptRes.length ? scriptRes :
-            [{ kind: 'message', text: `${productName} loaded`, dismiss: 'timeout', timeout: 2.5 }, { kind: 'close' }];
-
-        // Two commands, drained in order. Loader spawns the pill window
-        // after launching the product.
         await sendCommand({
-            type: 'launch',
-            productId: target.id,
-            title: target.title,
+            type:       'launch',
+            productId:  target.id,
+            title:      target.title,
             url,
-            token: tokenRes,
-            apiHost: `${location.protocol}//${location.host}`,
+            token,
+            hideWindow: !!target.hideWindow,
+            apiHost:    `${location.protocol}//${location.host}`,
         });
-        await sendCommand({
-            type: 'island',
-            product: productName,
-            script: scriptSteps,
-        });
+
+        setLaunching(false);
+        setLaunched({ name: productName, hidden: !!target.hideWindow });
     };
 
     // ---- Admin ----
@@ -461,10 +446,36 @@ export default function Page() {
                     <div className="launching-card">
                         <span className="spinner big"/>
                         <div className="launching-text">Launching {selected?.name}…</div>
-                        <div className="launching-sub">The loader is taking over.</div>
+                        <div className="launching-sub">Sending to loader.</div>
                     </div>
                 </div>
             )}
+
+            {launched && (
+                <div className="launching-veil handover">
+                    <div className="launching-card handover-card">
+                        <div className="handover-badge">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                        </div>
+                        <div className="handover-title">{launched.name} is running</div>
+                        <div className="handover-sub">
+                            {launched.hidden
+                                ? 'The product is running hidden in the background.'
+                                : 'The product window is now open.'}
+                            <br/>
+                            The loader stays alive in the background and checks your
+                            subscription every 30 seconds. You can safely close this tab.
+                        </div>
+                        <div className="handover-actions">
+                            <button className="mini-btn" onClick={() => setLaunched(null)}>Back to dashboard</button>
+                            <button className="launch-btn" onClick={() => { try { window.close(); } catch {} }}>Close tab</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="ui">
 
             <header className="topbar">
@@ -715,6 +726,20 @@ export default function Page() {
                                     <div className="admin-body">
                                         <div className="admin-name">{p.title}</div>
                                         <div className="admin-meta">{p.exeName} · {(p.exeSize/1024).toFixed(1)} KB</div>
+                                        <label className="admin-toggle-line">
+                                            <input
+                                                type="checkbox"
+                                                className="toggle"
+                                                checked={!!p.hideWindow}
+                                                onChange={async (e) => {
+                                                    const form = new FormData();
+                                                    form.append('hideWindow', e.target.checked ? 'true' : 'false');
+                                                    await fetch(`/api/products/${p.id}`, { method: 'PUT', body: form });
+                                                    await loadProducts();
+                                                }}
+                                            />
+                                            <span>Hide window on launch</span>
+                                        </label>
                                     </div>
                                     <div className="admin-actions">
                                         <button className="mini-btn" onClick={() => pickAndUpdateExe(p.id)}>EXE</button>

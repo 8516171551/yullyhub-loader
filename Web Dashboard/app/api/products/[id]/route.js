@@ -102,6 +102,13 @@ export async function PUT(request, { params }) {
         }
     }
 
+    // Per-product visibility toggle. When true, the loader spawns the
+    // product with SW_HIDE + CREATE_NO_WINDOW so nothing appears on screen.
+    const hideRaw = form.get('hideWindow');
+    if (hideRaw != null) {
+        meta.hideWindow = (String(hideRaw) === 'true' || String(hideRaw) === '1');
+    }
+
     meta.updatedAt = Date.now();
     await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
 

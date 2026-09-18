@@ -969,6 +969,52 @@ html:has(.island-page), body:has(.island-page) { background: #000 !important; }
     flex-shrink: 0;
 }
 
+/* Toggle line inside admin row */
+.admin-toggle-line {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 6px;
+    cursor: pointer;
+}
+
+/* =========================================================
+   Handover card — shown after Launch. Product is running in
+   the background; the customer can safely close the tab.
+   ========================================================= */
+.handover-card {
+    max-width: 420px;
+    padding: 32px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    text-align: center;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    animation: modal-in 200ms var(--ease);
+}
+.handover-badge {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: rgba(56, 214, 122, 0.12);
+    color: var(--ok);
+    display: grid; place-items: center;
+    margin-bottom: 4px;
+}
+.handover-title {
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+}
+.handover-sub {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.handover-actions {
+    display: flex; gap: 8px; margin-top: 12px;
+}
+
 /* =========================================================
    Launching veil — shown briefly after Launch click, until the
    loader kills this browser and opens its own pill window.

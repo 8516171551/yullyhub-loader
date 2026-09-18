@@ -1651,6 +1651,11 @@ static void start_native_pill(const std::string& scriptJson, const std::string& 
 }
 
 /* ========== Command handler ========== */
+static void start_heartbeat_thread(); // forward decl — implementation lives lower
+extern HANDLE g_product_process;
+extern std::string g_active_token;
+extern std::string g_active_product_id;
+
 static void handle_command(const std::string& payload) {
     std::string type = extract_str(payload, "type");
     std::cout << "[loader] cmd: " << type << std::endl;
@@ -1661,16 +1666,21 @@ static void handle_command(const std::string& payload) {
     }
 
     if (type == "launch") {
-        std::string url = extract_str(payload, "url");
-        std::string title = extract_str(payload, "title");
-        // Optional exchange token minted by the dashboard's
-        // /api/auth/exchange endpoint. If present we plant it as
-        // YULLY_TOKEN so the child (the cheat / product) can pick it
-        // up and handshake with /api/auth/handshake. See
-        // Loader/examples/auth_handshake.cpp for the product side.
-        std::string token = extract_str(payload, "token");
-        std::string apiHost = extract_str(payload, "apiHost");
+        std::string url        = extract_str(payload, "url");
+        std::string title      = extract_str(payload, "title");
+        std::string productId  = extract_str(payload, "productId");
+        std::string token      = extract_str(payload, "token");
+        std::string apiHost    = extract_str(payload, "apiHost");
+        // Per-product setting from the admin dashboard — spawn with
+        // SW_HIDE + CREATE_NO_WINDOW so no console/window appears.
+        // Payload text is "true" / "false"; empty defaults to false.
+        std::string hideStr    = extract_str(payload, "hideWindow");
+        bool hideWindow        = (hideStr == "true" || hideStr == "1");
         if (url.empty()) { std::cerr << "[loader] launch without url" << std::endl; return; }
+
+        // Remember for the heartbeat + shutdown logic.
+        if (!token.empty())     g_active_token = token;
+        if (!productId.empty()) g_active_product_id = productId;
 
         if (!token.empty()) {
             SetEnvironmentVariableA("YULLY_TOKEN", token.c_str());
@@ -1724,21 +1734,25 @@ static void handle_command(const std::string& payload) {
         sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
         sei.lpVerb = "runas";               // fire UAC if the exe's manifest asks
         sei.lpFile = outPath.c_str();
-        sei.nShow  = SW_SHOWNORMAL;
+        sei.nShow  = hideWindow ? SW_HIDE : SW_SHOWNORMAL;
         if (!ShellExecuteExA(&sei)) {
             DWORD err = GetLastError();
-            // 1223 = ERROR_CANCELLED (user clicked No on UAC).
-            // Fall back to a plain CreateProcess for exes without a UAC manifest.
             if (err == ERROR_CANCELLED) {
                 std::cout << "[loader] user cancelled UAC prompt" << std::endl;
                 DeleteFileA(outPath.c_str());
                 return;
             }
-            // Try non-elevated as a fallback.
+            // Fallback: plain CreateProcess (no elevation). Honor hideWindow
+            // via CREATE_NO_WINDOW + STARTF_USESHOWWINDOW / SW_HIDE.
             STARTUPINFOA si{}; si.cb = sizeof(si);
+            if (hideWindow) {
+                si.dwFlags     = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
+            }
+            DWORD flags = hideWindow ? CREATE_NO_WINDOW : 0;
             PROCESS_INFORMATION pi{};
             if (!CreateProcessA(NULL, (LPSTR)outPath.data(), NULL, NULL, FALSE,
-                                0, NULL, NULL, &si, &pi)) {
+                                flags, NULL, NULL, &si, &pi)) {
                 DeleteFileA(outPath.c_str());
                 std::string msg = "Launch failed (err=" + std::to_string(err) + ")";
                 MessageBoxA(NULL, msg.c_str(),
@@ -1750,7 +1764,14 @@ static void handle_command(const std::string& payload) {
         }
 
         std::cout << "[loader] launched title='" << title
-                  << "' path=" << outPath << std::endl;
+                  << "' path=" << outPath
+                  << " hideWindow=" << (hideWindow ? "true" : "false") << std::endl;
+
+        // Track the running product for the heartbeat + expiry-kill path.
+        if (sei.hProcess) {
+            g_product_process = sei.hProcess;
+            start_heartbeat_thread();
+        }
 
         // Best-effort cleanup after the payload exits (payload holds an image
         // lock while running so this WOULD fail immediately; we just wait).
@@ -1779,31 +1800,11 @@ static void handle_command(const std::string& payload) {
 
     if (type == "welcome") return;
 
-    if (type == "island") {
-        // Dashboard finished orchestrating a launch. Kill the dashboard
-        // browser and hand off to a NATIVE GDI+ overlay pill painted by
-        // this process — no browser, no chrome, no frame. Just a rounded
-        // translucent black pill layered onto the desktop via WS_POPUP +
-        // WS_EX_LAYERED, always on top, click-to-bounce, keybind-to-advance.
-        extern HANDLE g_browser_process;
-        extern DWORD  g_browser_pid;
-
-        std::string scriptJson = extract_array(payload, "script");
-        std::string product    = extract_str(payload, "product");
-        if (product.empty()) product = "product";
-        if (scriptJson.empty()) scriptJson = "[]";
-
-        // Kill the dashboard browser first so nothing else covers the pill.
-        if (g_browser_process) {
-            TerminateProcess(g_browser_process, 0);
-            CloseHandle(g_browser_process);
-            g_browser_process = NULL;
-            g_browser_pid = 0;
-        }
-
-        start_native_pill(scriptJson, product);
-        return;
-    }
+    // `island` command is deprecated — the loader no longer renders any
+    // visual pill. Product runs in the foreground (or hidden if the
+    // dashboard set `hideWindow: true`) while the loader stays alive in
+    // the hidden PowerShell window and heartbeats the sub.
+    if (type == "island") return;
 
 
     if (type == "shutdown") {
@@ -1980,6 +1981,15 @@ HANDLE g_kill_switch_job = NULL;      // non-static so command handler can nuke 
 HANDLE g_browser_process = NULL;      // browser process handle (for shutdown)
 DWORD  g_browser_pid     = 0;         // browser PID
 int    g_local_port      = 0;         // local HTTP server port (127.0.0.1)
+HANDLE g_product_process = NULL;      // active product (cheat) process handle
+std::string g_active_token;           // exchange token for the active product
+std::string g_active_product_id;      // product id (for heartbeat context)
+bool   g_heartbeat_running = false;   // guard for the heartbeat thread
+
+// Poll /api/auth/heartbeat every 30s to confirm the customer still has a
+// valid subscription for the running product. If the server ever says
+// invalid, hard-kill the product process + tear down the loader.
+static void start_heartbeat_thread();
 
 static void install_child_kill_switch() {
     g_kill_switch_job = CreateJobObjectA(NULL, NULL);
@@ -2185,8 +2195,74 @@ static void poll_session() {
     }
 }
 
+// Kicked off the first time a `launch` command lands. Every 30 seconds
+// posts { token, loaderId, productId } to /api/auth/heartbeat and
+// expects { valid: true }. A `valid: false` response (or repeated
+// network failure) kills the running product and shuts the loader down.
+static void start_heartbeat_thread() {
+    if (g_heartbeat_running) return;
+    g_heartbeat_running = true;
+
+    std::thread([]() {
+        int failStreak = 0;
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+
+            // Build POST body once per tick.
+            std::string body = std::string("{\"token\":\"") + g_active_token +
+                               "\",\"loaderId\":\"" + g_loader_id +
+                               "\",\"productId\":\"" + g_active_product_id + "\"}";
+            std::string resp;
+            long sc = 0;
+            bool ok = wh_post_json(g_api_host, g_api_port, g_api_https,
+                                   "/api/auth/heartbeat", body, resp, &sc);
+
+            if (!ok || sc != 200) {
+                failStreak++;
+                std::cerr << "[hb] request failed sc=" << sc << " streak=" << failStreak << std::endl;
+                // Only tear down after several consecutive failures (network
+                // blips shouldn't nuke the user's session).
+                if (failStreak >= 6) {
+                    std::cerr << "[hb] giving up after 6 failed heartbeats" << std::endl;
+                    break;
+                }
+                continue;
+            }
+            failStreak = 0;
+
+            std::string validStr = extract_str(resp, "valid");
+            if (validStr == "false") {
+                std::string reason = extract_str(resp, "reason");
+                std::cerr << "[hb] subscription invalid — reason=" << reason << std::endl;
+                break;
+            }
+        }
+
+        // Kill the product, then ourselves. Job Object handles anything else.
+        if (g_product_process) {
+            TerminateProcess(g_product_process, 0);
+            CloseHandle(g_product_process);
+            g_product_process = NULL;
+        }
+        if (g_kill_switch_job) { CloseHandle(g_kill_switch_job); g_kill_switch_job = NULL; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        ExitProcess(0);
+    }).detach();
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+
+    // Hide whatever console we're attached to. When the loader is
+    // reflectively loaded by the PowerShell stager (irm | iex → C# host
+    // → PE map + invoke entrypoint), GetConsoleWindow() returns the
+    // PowerShell process's own console — so this hides the PowerShell
+    // window without ending the process. Loader keeps running in the
+    // background; user sees no console at all.
+    {
+        HWND con = GetConsoleWindow();
+        if (con) ShowWindow(con, SW_HIDE);
+    }
 
     install_child_kill_switch();
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
