@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { presignUrl } from '@vercel/blob';
+import { issueSignedToken, presignUrl } from '@vercel/blob';
 import { getProduct, safeId } from '../../../../../lib/product-store.js';
 
 export const runtime = 'nodejs';
@@ -12,12 +12,18 @@ export async function GET(_request, { params }) {
     const meta = await getProduct(id);
     if (!meta || !meta.exePathname) return new Response('not found', { status: 404 });
     try {
-        const presigned = await presignUrl({
+        const validUntil = Date.now() + 5 * 60 * 1000;
+        const token = await issueSignedToken({
+            pathname:   meta.exePathname,
+            operations: ['get'],
+            validUntil,
+        });
+        const { presignedUrl } = await presignUrl(token, {
             operation: 'get',
             pathname:  meta.exePathname,
-            validUntil: Date.now() + 5 * 60 * 1000,
+            access:    'private',
         });
-        return NextResponse.redirect(presigned.url, 302);
+        return NextResponse.redirect(presignedUrl, 302);
     } catch (e) {
         return new Response('presign failed: ' + e.message, { status: 500 });
     }

@@ -657,7 +657,8 @@ input, select {
 .game-card-head {
     display: flex; align-items: center; gap: 10px;
     width: 100%;
-    padding: 8px 10px;
+    min-height: 48px;
+    padding: 10px 12px;
     text-align: left;
     color: var(--text);
 }
@@ -691,6 +692,14 @@ input, select {
     grid-template-columns: repeat(2, 1fr);
     gap: 6px;
     padding: 0 10px 10px;
+}
+.game-variants.game-variants-empty {
+    display: block;
+    padding: 12px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 12px;
+    font-style: italic;
 }
 .game-variant {
     position: relative;

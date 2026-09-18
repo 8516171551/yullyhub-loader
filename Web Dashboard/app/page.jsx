@@ -399,6 +399,9 @@ export default function Page() {
     const [imgLoading, setImgLoading] = useState(false);
     const [imgExpanded, setImgExpanded] = useState(null); // appid whose variants are shown
     const [imgPicking, setImgPicking] = useState(false);
+    // Per-game set of variant kinds that 404'd (game doesn't publish it).
+    // Used to render "no images available" when every variant is gone.
+    const [imgFailed, setImgFailed] = useState({});
     useEffect(() => {
         if (!imgQ || imgQ.trim().length < 2) { setImgResults([]); return; }
         const t = setTimeout(async () => {
@@ -721,37 +724,42 @@ export default function Page() {
                                                         <polyline points="6 9 12 15 18 9"/>
                                                     </svg>
                                                 </button>
-                                                {imgExpanded === g.appid && (
-                                                    <div className="game-variants">
-                                                        {['header','portrait','hero','capsule'].map((k) => {
-                                                            const src = g.images[k];
-                                                            if (!src) return null;
-                                                            return (
+                                                {imgExpanded === g.appid && (() => {
+                                                    const kinds = ['header','portrait','hero','capsule'];
+                                                    const failed = imgFailed[g.appid] || {};
+                                                    const alive = kinds.filter((k) => g.images[k] && !failed[k]);
+                                                    if (alive.length === 0) {
+                                                        return (
+                                                            <div className="game-variants game-variants-empty">
+                                                                No images published on Steam for this game.
+                                                            </div>
+                                                        );
+                                                    }
+                                                    return (
+                                                        <div className="game-variants">
+                                                            {alive.map((k) => (
                                                                 <button
                                                                     key={k}
                                                                     type="button"
                                                                     className={`game-variant v-${k}`}
                                                                     disabled={imgPicking}
-                                                                    onClick={() => pickImageFromUrl(src)}
+                                                                    onClick={() => pickImageFromUrl(g.images[k])}
                                                                     title={k}
                                                                 >
                                                                     <img
-                                                                        src={`/api/imgproxy?url=${encodeURIComponent(src)}`}
+                                                                        src={`/api/imgproxy?url=${encodeURIComponent(g.images[k])}`}
                                                                         alt={k}
-                                                                        onError={(e) => {
-                                                                            // Game doesn't publish this variant —
-                                                                            // yank the button entirely so the picker
-                                                                            // isn't a wall of empty boxes.
-                                                                            const btn = e.currentTarget.closest('button');
-                                                                            if (btn) btn.style.display = 'none';
-                                                                        }}
+                                                                        onError={() => setImgFailed((f) => ({
+                                                                            ...f,
+                                                                            [g.appid]: { ...(f[g.appid] || {}), [k]: true },
+                                                                        }))}
                                                                     />
                                                                     <span className="v-label">{k}</span>
                                                                 </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                )}
+                                                            ))}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         ))}
                                     </div>
