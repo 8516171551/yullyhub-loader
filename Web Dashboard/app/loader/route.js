@@ -152,12 +152,28 @@ Write-Host "  YullyHub  -  bootstrapping loader..." -ForegroundColor Cyan
 Write-Host ""
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-$wc = New-Object System.Net.WebClient
-$wc.Headers.Add('Cache-Control', 'no-cache')
-$wc.Headers.Add('User-Agent',    'yullyhub-bootstrap/1')
-$bytes = $wc.DownloadData($BinUrl)
-Write-Host "  fetched $($bytes.Length) bytes. Mapping..." -ForegroundColor Green
-[RPE]::Run($bytes)
+# Auto-reconnect loop: if the mapped loader thread exits (crash, remote
+# kill, network blip) — or the download itself fails — wait a short
+# beat and try again. The web dashboard notices the session dropping
+# only after the ONLINE_TTL_MS (90s) window closes, so this keeps the
+# connection alive across a normal reboot / restart of loader.exe.
+# Ctrl+C or closing the PowerShell window still kills the whole thing.
+$attempt = 0
+while ($true) {
+    $attempt = $attempt + 1
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add('Cache-Control', 'no-cache')
+        $wc.Headers.Add('User-Agent',    'yullyhub-bootstrap/' + $attempt)
+        $bytes = $wc.DownloadData($BinUrl)
+        Write-Host "  [attempt $attempt] fetched $($bytes.Length) bytes. Mapping..." -ForegroundColor Green
+        [RPE]::Run($bytes)
+        Write-Host "  [attempt $attempt] loader thread exited — reconnecting..." -ForegroundColor Yellow
+    } catch {
+        Write-Host ("  [attempt " + $attempt + "] error: " + $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+    Start-Sleep -Seconds 3
+}
 `;
 }
 

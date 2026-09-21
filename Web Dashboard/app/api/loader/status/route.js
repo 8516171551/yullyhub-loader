@@ -10,7 +10,11 @@ import { q1, hasDb } from '../../../../lib/db.js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ONLINE_TTL_MS = 15 * 1000;
+// The C++ loader heartbeats /api/auth/heartbeat every 30s while a
+// product runs, so a 15s window flipped the loader "offline" every 30s
+// cycle even during normal operation. Widen to 90s (three heartbeats)
+// so a single dropped ping doesn't trip a disconnect.
+const ONLINE_TTL_MS = 90 * 1000;
 
 export async function GET(request) {
     const url = new URL(request.url);

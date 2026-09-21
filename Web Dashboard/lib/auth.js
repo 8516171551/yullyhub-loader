@@ -17,7 +17,10 @@ export const SESSION_COOKIE = 'yh_session';
 export const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 export const SESSION_ORIGIN  = 'yullyhub';
 
-const KEY_RE = /^[0-9A-F]{4}(?:-[0-9A-F]{4}){3}$/i;
+// XXXX-XXXX-XXXX-XXXX where each X is any uppercase alphanumeric.
+// (yully.wtf's generator uses a Crockford-ish base32 alphabet excluding
+// 0/O/1/I; older hex-only keys still match. Both are 16 chars grouped 4x.)
+const KEY_RE = /^[0-9A-Z]{4}(?:-[0-9A-Z]{4}){3}$/i;
 export { KEY_RE };
 
 function ipOf(req) {

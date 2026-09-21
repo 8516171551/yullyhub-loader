@@ -54,3 +54,16 @@ export async function q1(sql, params = []) {
 
 // Kept for legacy imports that expected a pool-shaped object. No-op.
 export function getPool() { return client(); }
+
+// Legacy alias: berry-main routes call `query(sql, params?)` and expect an
+// array of rows. Wrap q() with a soft-fail for tables that don't exist on
+// the Neon schema yet — returns [] instead of 500-ing the whole route.
+export async function query(sql, params = []) {
+    try { return await q(sql, params); }
+    catch (e) {
+        if (e && (e.code === '42P01' || /relation .* does not exist/i.test(e.message || ''))) {
+            return [];
+        }
+        throw e;
+    }
+}

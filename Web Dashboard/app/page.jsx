@@ -248,17 +248,13 @@ export default function Page() {
                         count:  j.online ? 1 : 0,
                         agents: j.online ? [{ id: s, addr: 'https poll', connectedAt: j.lastSeen || Date.now() }] : [],
                     }));
-                    // Loader has been quiet for too long → dashboard is
-                    // stale. Kick back to the landing page (drops the
-                    // session param, forces re-connection). "No loader,
-                    // no dashboard" — no way to bypass.
-                    if (loaderConnected && !j.online && lastOnlineAtRef.current > 0
-                        && (now - lastOnlineAtRef.current) > 10_000) {
-                        const u = new URL(window.location.href);
-                        u.searchParams.delete('session');
-                        window.location.replace(u.toString());
-                        return;
-                    }
+                    // Old behavior kicked the user back to landing after
+                    // 10s of "offline" — which fired whenever the C++
+                    // loader missed a single heartbeat cycle. Users lost
+                    // their dashboard mid-session. Now we just surface
+                    // "reconnecting…" in the header banner and keep
+                    // polling forever; the customer decides when to
+                    // give up (close the tab / manually restart).
                 }
             } catch {}
             if (alive) setCheckingLoader(false);
@@ -280,6 +276,9 @@ export default function Page() {
     const [upload, setUpload] = useState({ exe: null, image: null, title: '' });
     const [launchCount, setLaunchCount] = useState(0);
     const [search, setSearch] = useState('');
+    const [redeemKey, setRedeemKey] = useState('');
+    const [redeemBusy, setRedeemBusy] = useState(false);
+    const [redeemMsg, setRedeemMsg] = useState(null); // {kind:'ok'|'err', text}
     const wsRef = useRef(null);
 
     const pushEvent = (msg, cls = '') => {
@@ -656,10 +655,87 @@ export default function Page() {
                         </svg>
                         <input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)}/>
                     </div>
+                    <form
+                        className="rail-redeem"
+                        onSubmit={async (e) => {
+                            e.preventDefault();
+                            const key = redeemKey.trim().toUpperCase();
+                            if (!key) return;
+                            setRedeemBusy(true);
+                            setRedeemMsg(null);
+                            try {
+                                const r = await fetch('/api/auth/redeem', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    credentials: 'include',
+                                    body: JSON.stringify({ key }),
+                                });
+                                const j = await r.json().catch(() => ({}));
+                                if (r.ok && j.ok) {
+                                    setRedeemMsg({
+                                        kind: 'ok',
+                                        text: j.product?.name
+                                            ? `Redeemed: ${j.product.name}`
+                                            : 'Key redeemed.',
+                                    });
+                                    setRedeemKey('');
+                                    await loadProducts();
+                                } else {
+                                    const map = {
+                                        bad_key_format:       'That key is not in XXXX-XXXX-XXXX-XXXX format.',
+                                        key_not_found:        'No key matches that.',
+                                        key_inactive:         'Key is inactive.',
+                                        key_blacklisted:      'Key is blacklisted.',
+                                        key_expired:          'Key has expired.',
+                                        key_already_redeemed: 'That key is already bound to another account.',
+                                        not_signed_in:        'Please sign in first.',
+                                    };
+                                    setRedeemMsg({
+                                        kind: 'err',
+                                        text: map[j.reason] || j.reason || 'Redemption failed.',
+                                    });
+                                }
+                            } catch {
+                                setRedeemMsg({ kind: 'err', text: 'Network error.' });
+                            } finally {
+                                setRedeemBusy(false);
+                            }
+                        }}
+                    >
+                        <input
+                            className="rail-redeem-input"
+                            placeholder="Paste license key"
+                            value={redeemKey}
+                            onChange={(e) => setRedeemKey(e.target.value)}
+                            spellCheck={false}
+                            autoComplete="off"
+                            disabled={redeemBusy}
+                            maxLength={19}
+                        />
+                        <button
+                            className="rail-redeem-btn"
+                            type="submit"
+                            disabled={redeemBusy || !redeemKey.trim()}
+                        >
+                            {redeemBusy ? '…' : 'Redeem'}
+                        </button>
+                        {redeemMsg && (
+                            <div
+                                className={`rail-redeem-msg ${redeemMsg.kind}`}
+                                onAnimationEnd={() => {
+                                    if (redeemMsg.kind === 'ok') setRedeemMsg(null);
+                                }}
+                            >
+                                {redeemMsg.text}
+                            </div>
+                        )}
+                    </form>
                     <div className="rail-list">
                         {filtered.length === 0 && (
                             <div className="rail-empty">
-                                {list.length === 0 ? 'No products yet. Upload in Admin.' : 'No matches.'}
+                                {list.length === 0
+                                    ? 'No products redeemed yet. Paste a license key above.'
+                                    : 'No matches.'}
                             </div>
                         )}
                         {filtered.map((p) => {
