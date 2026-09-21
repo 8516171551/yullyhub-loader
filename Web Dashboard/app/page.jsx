@@ -603,16 +603,27 @@ export default function Page() {
         return <LandingPage session={session} checking={checkingLoader} />;
     }
 
-    // X in the top-right: fire-and-forget the shutdown to the loader
-    // (server queue picks it up on next 3s poll) then hard-navigate to
-    // google.de instantly — no waiting on the network. Product that
-    // was already injected stays alive because launcher.cpp spawns it
-    // with CREATE_BREAKAWAY_FROM_JOB + doesn't Terminate on shutdown;
-    // the product's own yullyhub.h heartbeat keeps enforcing the sub.
+    // X in the top-right — three fire-and-forget signals then hard-nav:
+    //   1. shutdown command → loader.exe gets it on next 3s poll and
+    //      terminates (also revokes loader_sessions server-side).
+    //   2. wrapper-signal-exit → the PowerShell auto-restart wrapper
+    //      polls /api/loader/wrapper-should-exit after each RPE::Run
+    //      returns; when the exit signal for this IP is fresh, it
+    //      breaks its while-loop and the PS window closes.
+    //   3. window.location.replace to google.de — customer never sees a
+    //      dead dashboard even for a beat.
+    // Product that was already injected stays alive because
+    // launcher.cpp spawns it with CREATE_BREAKAWAY_FROM_JOB + doesn't
+    // Terminate on shutdown; the product's own yullyhub.h heartbeat
+    // keeps enforcing the sub.
     const closeLoader = () => {
         fetch('/api/command', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'shutdown', loaderId: session }),
+        }).catch(() => {});
+        fetch('/api/loader/wrapper-signal-exit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: '{}',
         }).catch(() => {});
         window.location.replace('https://google.de');
     };
@@ -638,7 +649,6 @@ export default function Page() {
                 </div>
                 <nav className="topnav">
                     <button className={`topnav-item ${!modal ? 'on' : ''}`} onClick={() => setModal(null)}>Products</button>
-                    <button className={`topnav-item ${modal === 'admin' ? 'on' : ''}`} onClick={() => setModal('admin')}>Admin</button>
                     <button className={`topnav-item ${modal === 'settings' ? 'on' : ''}`} onClick={() => setModal('settings')}>Settings</button>
                 </nav>
                 <div className="topright">
@@ -900,8 +910,11 @@ export default function Page() {
                 </section>
             </main>
 
-            {/* ---------- Admin modal ---------- */}
-            {modal === 'admin' && (
+            {/* Admin modal removed — the yullyhub Admin surface (EXE
+                upload, image picker, launch-script editor, per-product
+                actions) is now the "Loader Admin" section on yully.wtf.
+                See website/app/admin/loader/. */}
+            {false && (
                 <div className="veil" onClick={() => setModal(null)}>
                     <div className="modal" onClick={(e) => e.stopPropagation()}>
                         <div className="modal-head">

@@ -54,6 +54,19 @@ export async function GET(request) {
     );
     const lastSeen = row?.last_seen ? Number(row.last_seen) * 1000 : null;
     const online = !!lastSeen && (Date.now() - lastSeen) <= ONLINE_TTL_MS;
-    return NextResponse.json({ online, lastSeen },
+
+    // Is this loader_id revoked (any row for it, active or not)?
+    // The PowerShell wrapper polls this after loader.exe exits — if
+    // revoked, break out of the auto-restart loop and shut the PS
+    // window down cleanly.
+    const revokedRow = await q1(
+        `SELECT COUNT(*)::int AS n
+           FROM loader_sessions
+          WHERE loader_id = ? AND revoked_at IS NOT NULL`,
+        [id]
+    );
+    const revoked = !!(revokedRow?.n && Number(revokedRow.n) > 0);
+
+    return NextResponse.json({ online, lastSeen, revoked },
         { headers: { 'Cache-Control': 'no-store' } });
 }

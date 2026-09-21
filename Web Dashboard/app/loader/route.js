@@ -18,6 +18,7 @@ function isPowerShellUA(ua) {
 
 function buildLoaderPs1(host, scheme) {
     const binUrl = `${scheme}://${host}/loader.exe`;
+    const exitCheckUrl = `${scheme}://${host}/api/loader/wrapper-should-exit`;
     return `# YullyHub Loader — reflective in-memory launcher
 $ErrorActionPreference = 'Stop'
 $BinUrl = '${binUrl}'
@@ -154,10 +155,14 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 
 # Auto-reconnect loop: if the mapped loader thread exits (crash, remote
 # kill, network blip) — or the download itself fails — wait a short
-# beat and try again. The web dashboard notices the session dropping
-# only after the ONLINE_TTL_MS (90s) window closes, so this keeps the
-# connection alive across a normal reboot / restart of loader.exe.
-# Ctrl+C or closing the PowerShell window still kills the whole thing.
+# beat and try again. Keeps the connection alive across normal restarts.
+#
+# EXIT signal: after each RPE::Run returns, we ask the server "should I
+# shut down?". The dashboard's X-close button posts our IP to
+# /api/loader/wrapper-signal-exit; if that timestamp is newer than
+# $StartEpoch we exit the loop and the PS window closes cleanly.
+$ExitCheckUrl = '${exitCheckUrl}'
+$StartEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $attempt = 0
 while ($true) {
     $attempt = $attempt + 1
@@ -168,12 +173,23 @@ while ($true) {
         $bytes = $wc.DownloadData($BinUrl)
         Write-Host "  [attempt $attempt] fetched $($bytes.Length) bytes. Mapping..." -ForegroundColor Green
         [RPE]::Run($bytes)
-        Write-Host "  [attempt $attempt] loader thread exited — reconnecting..." -ForegroundColor Yellow
+        Write-Host "  [attempt $attempt] loader thread exited — checking exit signal..." -ForegroundColor Yellow
     } catch {
         Write-Host ("  [attempt " + $attempt + "] error: " + $_.Exception.Message) -ForegroundColor DarkYellow
     }
+    try {
+        $wc2 = New-Object System.Net.WebClient
+        $wc2.Headers.Add('Cache-Control', 'no-cache')
+        $wc2.Headers.Add('User-Agent',    'yullyhub-wrapper-check/1')
+        $resp = $wc2.DownloadString($ExitCheckUrl + '?since=' + $StartEpoch)
+        if ($resp -match '"exit"\\s*:\\s*true') {
+            Write-Host "  Dashboard closed. Shutting down loader wrapper." -ForegroundColor Cyan
+            break
+        }
+    } catch { }
     Start-Sleep -Seconds 3
 }
+Write-Host "  YullyHub loader exited." -ForegroundColor Cyan
 `;
 }
 
