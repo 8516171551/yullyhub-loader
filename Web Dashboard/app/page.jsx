@@ -233,7 +233,11 @@ export default function Page() {
         let alive = true;
         const check = async () => {
             try {
-                const r = await fetch(`/api/loader/status?id=${encodeURIComponent(s)}`, { cache: 'no-store' });
+                // keepalive=1 bumps loader_sessions.last_seen_at server-
+                // side so the row stays "online" as long as the dashboard
+                // tab is polling — matches the customer's rule: loader
+                // stays alive as long as the dashboard is running.
+                const r = await fetch(`/api/loader/status?id=${encodeURIComponent(s)}&keepalive=1`, { cache: 'no-store' });
                 if (!alive) return;
                 if (r.ok) {
                     const j = await r.json();
@@ -248,13 +252,20 @@ export default function Page() {
                         count:  j.online ? 1 : 0,
                         agents: j.online ? [{ id: s, addr: 'https poll', connectedAt: j.lastSeen || Date.now() }] : [],
                     }));
-                    // Old behavior kicked the user back to landing after
-                    // 10s of "offline" — which fired whenever the C++
-                    // loader missed a single heartbeat cycle. Users lost
-                    // their dashboard mid-session. Now we just surface
-                    // "reconnecting…" in the header banner and keep
-                    // polling forever; the customer decides when to
-                    // give up (close the tab / manually restart).
+                    // Once we've seen the loader online, if the status
+                    // route flips it back to offline we bounce to the
+                    // landing page INSTANTLY — customer sees the copy
+                    // command again and knows the loader has to be
+                    // restarted. The ONLINE_TTL_MS window (180s) plus
+                    // the dashboard keepalive below make sure a single
+                    // dropped heartbeat can't trigger this — it only
+                    // fires when the loader is genuinely gone.
+                    if (loaderConnected && !j.online) {
+                        const u = new URL(window.location.href);
+                        u.searchParams.delete('session');
+                        window.location.replace(u.toString());
+                        return;
+                    }
                 }
             } catch {}
             if (alive) setCheckingLoader(false);

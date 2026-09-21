@@ -1,29 +1,49 @@
-// GET /api/loader/status?id=<loaderId>
+// GET /api/loader/status?id=<loaderId>[&keepalive=1]
 //
-// Read-only check backed by loader_sessions.last_seen_at — does NOT
-// bump the timestamp so a chatty dashboard doesn't keep a dead loader
-// looking alive.
+// Read-only status check backed by loader_sessions.last_seen_at.
+// When the dashboard passes `?keepalive=1` we ALSO bump last_seen_at
+// — that's what keeps the loader from flipping offline while the
+// customer has the dashboard open. Rule from the customer: "loader
+// stays alive as long as the dashboard is running or a product is
+// loading." The C++ loader's own 30s heartbeat runs independently,
+// so if it dies the keepalive alone can't hold the row alive past
+// ONLINE_TTL_MS anyway.
 
 import { NextResponse } from 'next/server';
-import { q1, hasDb } from '../../../../lib/db.js';
+import { q, q1, hasDb } from '../../../../lib/db.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// The C++ loader heartbeats /api/auth/heartbeat every 30s while a
-// product runs, so a 15s window flipped the loader "offline" every 30s
-// cycle even during normal operation. Widen to 90s (three heartbeats)
-// so a single dropped ping doesn't trip a disconnect.
-const ONLINE_TTL_MS = 90 * 1000;
+// Widened to 3 minutes so a single dropped heartbeat can't ever trip
+// the "offline" flip. The dashboard's keepalive polls every 5s, so
+// while a browser tab is open this window stays fresh with plenty of
+// headroom — the flip only fires when both the C++ loader AND the
+// dashboard have genuinely gone away.
+const ONLINE_TTL_MS = 180 * 1000;
 
 export async function GET(request) {
     const url = new URL(request.url);
     const id  = url.searchParams.get('id');
+    const keepalive = url.searchParams.get('keepalive') === '1';
     if (!id) return NextResponse.json({ online: false, error: 'no id' }, { status: 400 });
 
     if (!hasDb()) {
         return NextResponse.json({ online: false, note: 'db-not-configured' },
             { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    if (keepalive) {
+        // Best-effort bump — never fail the status check if this
+        // errors (e.g. the row was already revoked).
+        try {
+            await q(
+                `UPDATE loader_sessions
+                    SET last_seen_at = CURRENT_TIMESTAMP
+                  WHERE loader_id = ? AND revoked_at IS NULL`,
+                [id],
+            );
+        } catch { /* ignore */ }
     }
 
     const row = await q1(
