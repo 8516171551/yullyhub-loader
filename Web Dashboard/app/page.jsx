@@ -279,6 +279,7 @@ export default function Page() {
     const [redeemKey, setRedeemKey] = useState('');
     const [redeemBusy, setRedeemBusy] = useState(false);
     const [redeemMsg, setRedeemMsg] = useState(null); // {kind:'ok'|'err', text}
+    const [activating, setActivating] = useState(false);
     const wsRef = useRef(null);
 
     const pushEvent = (msg, cls = '') => {
@@ -788,14 +789,71 @@ export default function Page() {
                                         <h1 className="detail-title">{selected.name}</h1>
                                         <div className="detail-sub">{selected.exeName} · {selected.sizeKB} KB</div>
                                     </div>
-                                    <button
-                                        className="launch-btn"
-                                        disabled={!state.online || launching}
-                                        onClick={handleStart}
-                                    >
-                                        Launch
-                                    </button>
+                                    {selected.license?.status === 'pending' ? (
+                                        <button
+                                            className="launch-btn activate-btn"
+                                            disabled={activating || !selected.license?.key}
+                                            onClick={async () => {
+                                                if (activating) return;
+                                                setActivating(true);
+                                                try {
+                                                    const r = await fetch('/api/auth/activate', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        credentials: 'include',
+                                                        body: JSON.stringify({ key: selected.license.key }),
+                                                    });
+                                                    const j = await r.json().catch(() => ({}));
+                                                    if (r.ok && j.ok) {
+                                                        pushEvent(`activated ${selected.name}`, 'ok');
+                                                        await loadProducts();
+                                                    } else {
+                                                        pushEvent(`activation failed: ${j.reason || 'unknown'}`, 'warn');
+                                                    }
+                                                } catch (e) {
+                                                    pushEvent(`activation error: ${e.message || e}`, 'warn');
+                                                } finally {
+                                                    setActivating(false);
+                                                }
+                                            }}
+                                        >
+                                            {activating ? 'Activating…' : 'Activate Subscription'}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            className="launch-btn"
+                                            disabled={!state.online || launching}
+                                            onClick={handleStart}
+                                        >
+                                            Launch
+                                        </button>
+                                    )}
                                 </div>
+
+                                {selected.license && (
+                                    <div className={`license-strip ${selected.license.status === 'pending' ? 'pending' : 'active'}`}>
+                                        <div className="license-strip-key">
+                                            <span className="license-strip-label">License</span>
+                                            <code>{selected.license.key}</code>
+                                        </div>
+                                        <div className="license-strip-status">
+                                            {selected.license.status === 'pending' ? (
+                                                <>
+                                                    <span className="dot pending" />
+                                                    Not yet activated — subscription timer starts when you click Activate.
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="dot active" />
+                                                    Active
+                                                    {selected.license.expires_at
+                                                        ? ` · expires ${new Date(selected.license.expires_at).toLocaleString()}`
+                                                        : ' · lifetime'}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
 
                                 <div className="detail-cards">
                                     <div className="detail-card">

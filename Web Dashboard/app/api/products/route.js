@@ -15,24 +15,52 @@ export async function GET() {
         // sign-in to see anything anyway.
         if (!s || !s.user) return NextResponse.json({ products: [] });
 
-        // Admins see everything (they use the same UI to manage the
-        // catalog). Everyone else sees only products they hold at least
-        // one active, non-expired license for.
-        if (s.user.role === 'admin') {
-            return NextResponse.json({ products: all });
-        }
-
-        const owned = await q(
-            `SELECT DISTINCT product_id
+        // Every user — admins included — only sees products they hold a
+        // live license for on the customer-facing rail. The full catalog
+        // is available under the Admin tab (a separate view).
+        // For each licensed product we surface the "best" license bound
+        // to the user: prefer an already-activated one (subscription is
+        // running), otherwise the newest pending one so the UI can show
+        // an Activate Subscription button.
+        const rows = await q(
+            `SELECT DISTINCT ON (product_id)
+                    product_id,
+                    "key"         AS license_key,
+                    tier,
+                    duration_days,
+                    activated_at,
+                    expires_at
                FROM licenses
               WHERE redeemed_by_user_id = ?
                 AND (active IS NULL OR active = TRUE)
                 AND blacklisted_at IS NULL
-                AND (expires_at IS NULL OR expires_at > NOW())`,
+                AND (expires_at IS NULL OR expires_at > NOW())
+              ORDER BY product_id,
+                       (activated_at IS NULL) ASC,  -- activated first
+                       created_at DESC`,
             [s.user.id],
         );
-        const ownedIds = new Set(owned.map((r) => String(r.product_id)));
-        const products = all.filter((p) => ownedIds.has(String(p.id)));
+        const byProduct = new Map();
+        for (const r of rows) byProduct.set(String(r.product_id), r);
+
+        const products = all
+            .filter((p) => byProduct.has(String(p.id)))
+            .map((p) => {
+                const lic = byProduct.get(String(p.id));
+                return {
+                    ...p,
+                    license: {
+                        key:            lic.license_key,
+                        tier:           lic.tier,
+                        duration_days:  lic.duration_days,
+                        activated_at:   lic.activated_at,
+                        expires_at:     lic.expires_at,
+                        status: lic.activated_at
+                            ? 'active'
+                            : 'pending',
+                    },
+                };
+            });
         return NextResponse.json({ products });
     } catch (e) {
         return NextResponse.json({ products: [], error: e.message }, { status: 500 });
