@@ -365,8 +365,8 @@ input, select {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    margin-top: 14px;
-    padding: 10px 14px;
+    margin: 16px 0 20px;
+    padding: 12px 14px;
     border-radius: 10px;
     font-size: 12.5px;
     line-height: 1.35;
