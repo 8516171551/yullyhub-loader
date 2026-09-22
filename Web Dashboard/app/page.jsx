@@ -479,9 +479,19 @@ export default function Page() {
                 return;
             }
 
-            // Success: hand over to a "product running" state. Loader
-            // keeps injecting; dashboard stays open so the customer can
-            // launch another product or hit X to close everything.
+            // Push script steps to the overlay bar on the user's desktop.
+            const scriptSteps = Array.isArray(target.script) && target.script.length > 0
+                ? target.script
+                : [
+                    { kind: 'message', text: `Loading ${productName}...`, dismiss: 'timeout', timeout: 3 },
+                    { kind: 'success', text: `${productName} is running`, timeout: 3 },
+                ];
+            fetch('/api/loader/overlay', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ steps: scriptSteps }),
+            }).catch(() => {});
+
             setLaunched({ name: productName });
             pushEvent(`launched ${productName}`, 'ok');
         } finally {
@@ -1025,13 +1035,7 @@ export default function Page() {
                                     </div>
                                 </div>
 
-                                <div className="detail-actions">
-                                    <button className="mini-btn" onClick={() => openScriptEditor(selected)}>Edit script</button>
-                                    <button className="mini-btn" onClick={() => pickAndUpdateExe(selected.id)}>Replace EXE</button>
-                                    <button className="mini-btn" onClick={() => pickAndUpdateImage(selected.id)}>Replace image</button>
-                                    <button className="mini-btn" onClick={() => renameProduct(selected.id, selected.title)}>Rename</button>
-                                    <button className="mini-btn danger" onClick={() => deleteProduct(selected.id)}>Delete</button>
-                                </div>
+                                {/* Admin actions moved to yully.wtf /admin/loader */}
                             </div>
                         </>
                     )}
@@ -1184,13 +1188,7 @@ export default function Page() {
                                             <span>Hide window on launch</span>
                                         </label>
                                     </div>
-                                    <div className="admin-actions">
-                                        <button className="mini-btn" onClick={() => pickAndUpdateExe(p.id)}>EXE</button>
-                                        <button className="mini-btn" onClick={() => pickAndUpdateImage(p.id)}>IMG</button>
-                                        <button className="mini-btn" onClick={() => renameProduct(p.id, p.title)}>Rename</button>
-                                        <button className="mini-btn" onClick={() => openScriptEditor(p)}>Script</button>
-                                        <button className="mini-btn danger" onClick={() => deleteProduct(p.id)}>Delete</button>
-                                    </div>
+                                    {/* Admin actions moved to yully.wtf /admin/loader */}
                                 </div>
                             ))}
                         </div>
