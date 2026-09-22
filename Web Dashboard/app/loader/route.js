@@ -25,189 +25,285 @@ $ErrorActionPreference = 'Stop'
 $BinUrl = '${binUrl}'
 $OverlayUrl = '${overlayUrl}'
 
-# ---------- Status Bar (WinForms overlay) ----------
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+# ---------- Status Bar (WPF overlay) ----------
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Xaml
 
 $barCode = @'
+#pragma warning disable 0169, 0414, 0649
 using System;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Windows.Forms;
-using System.Threading;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.Windows.Threading;
 
-public class StatusBar : Form {
-    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKbProc cb, IntPtr hMod, uint tid);
+public class StatusBar {
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, KbDel cb, IntPtr hMod, uint tid);
     [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
-    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wP, IntPtr lP);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int n, IntPtr w, IntPtr l);
     [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
-    delegate IntPtr LowLevelKbProc(int nCode, IntPtr wP, IntPtr lP);
+    delegate IntPtr KbDel(int n, IntPtr w, IntPtr l);
 
-    static StatusBar instance;
-    static Thread uiThread;
-    static IntPtr hookId;
-    static LowLevelKbProc hookDelegate;
+    static Window win;
+    static Thread thr;
+    static IntPtr hk;
+    static KbDel hkCb;
 
-    Label lbl;
-    Panel accent;
-    System.Windows.Forms.Timer pollTimer;
-    System.Windows.Forms.Timer stepTimer;
+    static TextBlock lbl;
+    static TextBox logBox;
+    static RowDefinition logRow;
+    static Polygon arrowPoly;
+    static Border accentBd;
+    static bool exp;
 
-    string pollUrl;
-    long lastVersion = 0;
-    string[][] steps;      // [kind, text, dismiss, keybind, timeoutMs]
-    int stepIdx = -1;
-    string waitKey = null;
+    static string pollUrl;
+    static long lastVer;
+    static string[][] steps;
+    static int sIdx = -1;
+    static string waitKey;
+    static DispatcherTimer pollTmr, stepTmr;
 
-    StatusBar(string url) {
-        pollUrl = url;
-        FormBorderStyle = FormBorderStyle.None;
-        BackColor = Color.FromArgb(14, 14, 16);
-        Opacity = 0.95;
-        TopMost = true;
-        ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
-        var wa = Screen.PrimaryScreen.WorkingArea;
-        Width  = Math.Min(wa.Width - 40, 900);
-        Height = 44;
-        Left   = wa.Left + (wa.Width - Width) / 2;
-        Top    = wa.Bottom - Height - 16;
-        var gp = new GraphicsPath();
-        int r = 12;
-        gp.AddArc(0, 0, r*2, r*2, 180, 90);
-        gp.AddArc(Width-r*2, 0, r*2, r*2, 270, 90);
-        gp.AddArc(Width-r*2, Height-r*2, r*2, r*2, 0, 90);
-        gp.AddArc(0, Height-r*2, r*2, r*2, 90, 90);
-        gp.CloseFigure();
-        Region = new Region(gp);
+    const double BW = 700, BH = 40, LH = 160, RAD = 6;
 
-        accent = new Panel { Height = 3, Dock = DockStyle.Top, BackColor = Color.FromArgb(71, 146, 226) };
-        lbl = new Label {
-            Text = "  YullyHub — ready",
-            ForeColor = Color.FromArgb(190, 190, 195),
-            Font = new Font("Segoe UI", 10f, FontStyle.Regular),
-            AutoSize = false, Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleCenter
+    static void MakeUI() {
+        var wa = SystemParameters.WorkArea;
+        double w = Math.Min(wa.Width - 40, BW);
+        win = new Window {
+            WindowStyle = WindowStyle.None,
+            AllowsTransparency = true,
+            Background = Brushes.Transparent,
+            Topmost = true, ShowInTaskbar = false,
+            ResizeMode = ResizeMode.NoResize,
+            Width = w, Height = BH,
+            Left = wa.Left + (wa.Width - w) / 2,
+            Top = wa.Bottom - BH - 14
         };
-        Controls.Add(lbl);
-        Controls.Add(accent);
 
-        stepTimer = new System.Windows.Forms.Timer();
-        stepTimer.Tick += (s, e) => { stepTimer.Stop(); Advance(); };
+        var outer = new Border {
+            Background = new SolidColorBrush(Color.FromArgb(242, 18, 18, 22)),
+            CornerRadius = new CornerRadius(RAD),
+            ClipToBounds = true
+        };
 
-        pollTimer = new System.Windows.Forms.Timer { Interval = 1500 };
-        pollTimer.Tick += (s, e) => Poll();
-        pollTimer.Start();
+        var grid = new Grid();
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(3) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(BH - 3) });
+        logRow = new RowDefinition { Height = new GridLength(0) };
+        grid.RowDefinitions.Add(logRow);
+
+        accentBd = new Border { Background = new SolidColorBrush(Color.FromRgb(71, 146, 226)) };
+        Grid.SetRow(accentBd, 0);
+
+        var content = new Grid();
+        content.ColumnDefinitions.Add(new ColumnDefinition());
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+
+        lbl = new TextBlock {
+            Text = "YullyHub " + ((char)0x2014) + " ready",
+            Foreground = new SolidColorBrush(Color.FromRgb(190, 190, 195)),
+            FontFamily = new FontFamily("Segoe UI"), FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        Grid.SetColumn(lbl, 0);
+
+        var arrowBtn = new Border { Background = Brushes.Transparent, Cursor = Cursors.Hand };
+        arrowPoly = new Polygon {
+            Points = new PointCollection { new Point(0,0), new Point(8,0), new Point(4,4) },
+            Fill = new SolidColorBrush(Color.FromRgb(100, 100, 105)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        arrowBtn.Child = arrowPoly;
+        arrowBtn.MouseLeftButtonDown += (s, e) => ToggleLog();
+        Grid.SetColumn(arrowBtn, 1);
+
+        content.Children.Add(lbl);
+        content.Children.Add(arrowBtn);
+        Grid.SetRow(content, 1);
+
+        var logBd = new Border {
+            Background = new SolidColorBrush(Color.FromRgb(10, 10, 12)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(40, 40, 44)),
+            BorderThickness = new Thickness(0, 1, 0, 0)
+        };
+        logBox = new TextBox {
+            IsReadOnly = true,
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(130, 130, 135)),
+            FontFamily = new FontFamily("Consolas"), FontSize = 11,
+            BorderThickness = new Thickness(0),
+            TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(10, 6, 10, 6)
+        };
+        logBd.Child = logBox;
+        Grid.SetRow(logBd, 2);
+
+        grid.Children.Add(accentBd);
+        grid.Children.Add(content);
+        grid.Children.Add(logBd);
+        outer.Child = grid;
+        win.Content = outer;
+
+        stepTmr = new DispatcherTimer();
+        stepTmr.Tick += (s, e) => { stepTmr.Stop(); Advance(); };
+        pollTmr = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        pollTmr.Tick += (s, e) => Poll();
+        pollTmr.Start();
     }
 
-    void Poll() {
+    static void ToggleLog() {
+        exp = !exp;
+        var wa = SystemParameters.WorkArea;
+        if (exp) {
+            logRow.Height = new GridLength(LH);
+            win.Height = BH + LH;
+            win.Top = wa.Bottom - win.Height - 14;
+            arrowPoly.Points = new PointCollection { new Point(0,4), new Point(8,4), new Point(4,0) };
+        } else {
+            logRow.Height = new GridLength(0);
+            win.Height = BH;
+            win.Top = wa.Bottom - BH - 14;
+            arrowPoly.Points = new PointCollection { new Point(0,0), new Point(8,0), new Point(4,4) };
+        }
+    }
+
+    static void Poll() {
         try {
             var wc = new WebClient();
             wc.Headers.Add("Cache-Control", "no-cache");
             wc.Headers.Add("User-Agent", "yullyhub-overlay/1");
-            string resp = wc.DownloadString(pollUrl + "?v=" + lastVersion);
+            string resp = wc.DownloadString(pollUrl + "?v=" + lastVer);
             if (resp == null || !resp.StartsWith("v=")) return;
-            var lines = resp.Split(new[]{'\\r','\\n'}, StringSplitOptions.RemoveEmptyEntries);
+            var lines = resp.Split(new char[]{(char)13,(char)10}, StringSplitOptions.RemoveEmptyEntries);
             long ver = 0;
             long.TryParse(lines[0].Substring(2), out ver);
-            if (ver <= lastVersion || lines.Length < 2) return;
-            lastVersion = ver;
+            if (ver <= lastVer || lines.Length < 2) return;
+            lastVer = ver;
             var arr = new string[lines.Length - 1][];
-            for (int i = 1; i < lines.Length; i++) {
+            for (int i = 1; i < lines.Length; i++)
                 arr[i-1] = lines[i].Split('|');
-            }
             steps = arr;
-            stepIdx = -1;
+            sIdx = -1;
             Advance();
         } catch {}
     }
 
-    void Advance() {
-        stepTimer.Stop();
-        stepIdx++;
-        if (steps == null || stepIdx >= steps.Length) {
-            lbl.Text = "  YullyHub — ready";
-            lbl.ForeColor = Color.FromArgb(190, 190, 195);
-            accent.BackColor = Color.FromArgb(71, 146, 226);
+    static void Advance() {
+        stepTmr.Stop();
+        sIdx++;
+        if (steps == null || sIdx >= steps.Length) {
+            lbl.Text = "YullyHub " + ((char)0x2014) + " ready";
+            lbl.Foreground = new SolidColorBrush(Color.FromRgb(190, 190, 195));
+            accentBd.Background = new SolidColorBrush(Color.FromRgb(71, 146, 226));
             waitKey = null;
             return;
         }
-        var s = steps[stepIdx];
-        string kind    = s.Length > 0 ? s[0] : "message";
-        string text    = s.Length > 1 ? s[1] : "";
+        var s = steps[sIdx];
+        string kind = s.Length > 0 ? s[0] : "message";
+        string text = s.Length > 1 ? s[1] : "";
         string dismiss = s.Length > 2 ? s[2] : "timeout";
-        string keybind = s.Length > 3 ? s[3] : "";
+        string kb = s.Length > 3 ? s[3] : "";
         int ms = 3000;
         if (s.Length > 4) int.TryParse(s[4], out ms);
         if (ms < 500) ms = 3000;
 
-        lbl.Text = "  " + text;
+        lbl.Text = text;
         if (kind == "success") {
-            accent.BackColor = Color.FromArgb(46, 160, 67);
-            lbl.ForeColor = Color.FromArgb(46, 200, 90);
+            accentBd.Background = new SolidColorBrush(Color.FromRgb(46, 160, 67));
+            lbl.Foreground = new SolidColorBrush(Color.FromRgb(46, 200, 90));
         } else if (kind == "close") {
-            accent.BackColor = Color.FromArgb(200, 60, 60);
-            lbl.ForeColor = Color.FromArgb(200, 180, 180);
+            accentBd.Background = new SolidColorBrush(Color.FromRgb(200, 60, 60));
+            lbl.Foreground = new SolidColorBrush(Color.FromRgb(200, 180, 180));
         } else {
-            accent.BackColor = Color.FromArgb(71, 146, 226);
-            lbl.ForeColor = Color.FromArgb(220, 220, 225);
+            accentBd.Background = new SolidColorBrush(Color.FromRgb(71, 146, 226));
+            lbl.Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 225));
         }
-        if (dismiss == "keybind" && keybind.Length > 0) {
-            waitKey = keybind;
-            lbl.Text += "   [ " + keybind + " ]";
+        if (dismiss == "keybind" && kb.Length > 0) {
+            waitKey = kb;
+            lbl.Text += "   [ " + kb + " ]";
         } else {
             waitKey = null;
         }
-        stepTimer.Interval = ms;
-        stepTimer.Start();
+        stepTmr.Interval = TimeSpan.FromMilliseconds(ms);
+        stepTmr.Start();
     }
 
-    void OnGlobalKey(int vk) {
+    static void OnKey(int vk) {
         if (waitKey == null) return;
-        string name = ((Keys)vk).ToString();
+        string name = KeyInterop.KeyFromVirtualKey(vk).ToString();
         if (name.Equals(waitKey, StringComparison.OrdinalIgnoreCase)) {
             waitKey = null;
-            stepTimer.Stop();
+            stepTmr.Stop();
             Advance();
         }
     }
 
     public static void Launch(string url) {
-        uiThread = new Thread(() => {
-            instance = new StatusBar(url);
-            hookDelegate = (nCode, wP, lP) => {
-                if (nCode >= 0 && wP == (IntPtr)0x0100) {
-                    int vk = Marshal.ReadInt32(lP);
-                    try { instance.BeginInvoke((Action)(() => instance.OnGlobalKey(vk))); } catch {}
+        pollUrl = url;
+        thr = new Thread(() => {
+            MakeUI();
+            hkCb = (n, w, l) => {
+                if (n >= 0 && w == (IntPtr)0x0100) {
+                    int vk = Marshal.ReadInt32(l);
+                    try { win.Dispatcher.BeginInvoke((Action)(() => OnKey(vk))); } catch {}
                 }
-                return CallNextHookEx(hookId, nCode, wP, lP);
+                return CallNextHookEx(hk, n, w, l);
             };
             using (var p = System.Diagnostics.Process.GetCurrentProcess())
             using (var m = p.MainModule)
-                hookId = SetWindowsHookEx(13, hookDelegate, GetModuleHandle(m.ModuleName), 0);
-            Application.Run(instance);
-            UnhookWindowsHookEx(hookId);
+                hk = SetWindowsHookEx(13, hkCb, GetModuleHandle(m.ModuleName), 0);
+            win.Show();
+            Dispatcher.Run();
+            UnhookWindowsHookEx(hk);
         });
-        uiThread.SetApartmentState(ApartmentState.STA);
-        uiThread.IsBackground = true;
-        uiThread.Start();
+        thr.SetApartmentState(ApartmentState.STA);
+        thr.IsBackground = true;
+        thr.Start();
+    }
+
+    public static void Log(string text) {
+        if (win == null) return;
+        try {
+            win.Dispatcher.BeginInvoke((Action)(() => {
+                logBox.AppendText(text + System.Environment.NewLine);
+                logBox.ScrollToEnd();
+            }));
+        } catch {}
     }
 
     public static void SetText(string txt) {
-        if (instance != null && !instance.IsDisposed)
-            try { instance.BeginInvoke((Action)(() => instance.lbl.Text = "  " + txt)); } catch {}
+        if (win == null) return;
+        try { win.Dispatcher.BeginInvoke((Action)(() => lbl.Text = txt)); } catch {}
     }
 
     public static void Kill() {
-        if (instance != null && !instance.IsDisposed)
-            try { instance.BeginInvoke((Action)(() => instance.Close())); } catch {}
+        if (win == null) return;
+        try {
+            win.Dispatcher.BeginInvoke((Action)(() => {
+                win.Close();
+                win.Dispatcher.InvokeShutdown();
+            }));
+        } catch {}
     }
 }
 '@
 
-Add-Type -TypeDefinition $barCode -ReferencedAssemblies System.Windows.Forms,System.Drawing -ErrorAction SilentlyContinue
+$barRefs = @(
+    [System.Windows.Window].Assembly.Location,
+    [System.Windows.Media.Brushes].Assembly.Location,
+    [System.Windows.Threading.Dispatcher].Assembly.Location,
+    [System.Xaml.XamlReader].Assembly.Location
+)
+Add-Type -TypeDefinition $barCode -ReferencedAssemblies $barRefs -ErrorAction SilentlyContinue
 [StatusBar]::Launch($OverlayUrl)
 
 $csharp = @'
@@ -361,22 +457,28 @@ while ($true) {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add('Cache-Control', 'no-cache')
         $wc.Headers.Add('User-Agent',    'yullyhub-bootstrap/' + $attempt)
+        [StatusBar]::Log("[attempt $attempt] Downloading loader...")
         $bytes = $wc.DownloadData($BinUrl)
         Write-Host "  [attempt $attempt] fetched $($bytes.Length) bytes. Mapping..." -ForegroundColor Green
+        [StatusBar]::Log("[attempt $attempt] Downloaded $($bytes.Length) bytes. Mapping PE...")
         [RPE]::Run($bytes)
         Write-Host "  [attempt $attempt] loader thread exited." -ForegroundColor Yellow
+        [StatusBar]::Log("[attempt $attempt] Loader thread exited.")
     } catch {
         Write-Host ("  [attempt " + $attempt + "] error: " + $_.Exception.Message) -ForegroundColor DarkYellow
+        try { [StatusBar]::Log("[attempt $attempt] Error: " + $_.Exception.Message) } catch {}
     }
     $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $runStart
     if ($elapsed -lt 8) {
         $rapidFails = $rapidFails + 1
         Write-Host ("  Rapid exit (" + $elapsed + "s). Rapid-fail count: " + $rapidFails + "/3.") -ForegroundColor Magenta
+        try { [StatusBar]::Log("Rapid exit (" + $elapsed + "s). Fail " + $rapidFails + "/3.") } catch {}
     } else {
         $rapidFails = 0
     }
     if ($rapidFails -ge 3) {
         Write-Host "  Loader is in a crash loop. Exiting wrapper — re-run the command after the issue is fixed." -ForegroundColor Red
+        try { [StatusBar]::Log("Crash loop detected. Exiting.") } catch {}
         break
     }
     try {
@@ -386,6 +488,7 @@ while ($true) {
         $resp = $wc2.DownloadString($ExitCheckUrl + '?since=' + $StartEpoch)
         if ($resp -match '"exit"\\s*:\\s*true') {
             Write-Host "  Dashboard closed. Shutting down loader wrapper." -ForegroundColor Cyan
+            try { [StatusBar]::Log("Dashboard closed. Shutting down.") } catch {}
             break
         }
     } catch { }
