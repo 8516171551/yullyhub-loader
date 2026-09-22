@@ -39,7 +39,18 @@ export async function GET(request, { params }) {
     const id = safeId(params.id);
     if (!id) return new Response('bad id', { status: 400 });
     const meta = await getProduct(id);
-    if (!meta || !meta.exePathname) return new Response('not found', { status: 404 });
+    if (!meta) return new Response('not found', { status: 404 });
+
+    // Preferred path: the product row carries a direct `exe_url` (set
+    // by yully.wtf's Loader Admin uploads which land on the yully-wtf
+    // Blob store — a different store than yullyhub's own, so we can't
+    // presign against it here). The url is public, so a plain 302 does
+    // the job and the loader downloads it end-to-end.
+    if (meta.exeUrl) {
+        return NextResponse.redirect(meta.exeUrl, 302);
+    }
+
+    if (!meta.exePathname) return new Response('not found', { status: 404 });
     try {
         const validUntil = Date.now() + 5 * 60 * 1000;
         const token = await issueSignedToken({

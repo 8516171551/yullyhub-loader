@@ -424,6 +424,64 @@ input, select {
     50%     { opacity: 0.35; }
 }
 
+/* --- Inline launch feedback (kept on the dashboard, no redirect) --- */
+.launch-error {
+    position: relative;
+    margin: 14px 0 4px;
+    padding: 12px 14px 12px 14px;
+    border-radius: 10px;
+    background: rgba(239, 68, 68, 0.10);
+    border: 1px solid rgba(239, 68, 68, 0.32);
+    color: #fecaca;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.launch-error-title {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600;
+    color: #fecaca;
+    margin-bottom: 4px;
+}
+.launch-error-body {
+    color: rgba(254, 202, 202, 0.9);
+}
+.launch-error-dismiss {
+    position: absolute;
+    top: 10px; right: 10px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.7);
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 120ms var(--ease);
+}
+.launch-error-dismiss:hover { background: rgba(255,255,255,0.10); }
+
+.launch-ok {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 14px 0 4px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: rgba(34, 197, 94, 0.08);
+    border: 1px solid rgba(34, 197, 94, 0.28);
+    color: #bbf7d0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.launch-ok-dot {
+    width: 8px; height: 8px; border-radius: 999px;
+    background: #22c55e;
+    box-shadow: 0 0 10px rgba(34, 197, 94, 0.7);
+    margin-top: 5px;
+    flex-shrink: 0;
+    animation: pulse-amber 1.6s ease-in-out infinite;
+}
+.launch-ok-body strong { color: #f0fdf4; }
+
 .rail-list {
     flex: 1;
     overflow-y: auto;

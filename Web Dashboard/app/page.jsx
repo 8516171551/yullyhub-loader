@@ -380,42 +380,106 @@ export default function Page() {
     // hideWindow flag is set). The loader keeps running with the
     // PowerShell console hidden and heartbeats /api/auth/heartbeat every
     // 30s to enforce the subscription — if the sub expires it hard-kills
-    // the product and itself. Dashboard transitions to a "product active"
-    // handover screen the user can close whenever.
+    // the product and itself.
+    //
+    // OLD behavior: window.location.replace('https://yully.wtf') fired
+    // immediately after the command was queued. So any failure —
+    // missing exe_url, offline loader, DB error — was invisible; the
+    // customer just saw a redirect to yully.wtf.
+    //
+    // NEW behavior:
+    //   - stay on the dashboard the whole time
+    //   - preflight the exe URL (HEAD) so we surface "product has no
+    //     EXE configured" errors BEFORE queuing the launch
+    //   - refuse to queue if the loader is offline (delivered=0 would
+    //     otherwise be silently swallowed)
+    //   - surface any error inline with a clear message
     const [launching, setLaunching] = useState(false);
     const [launched,  setLaunched]  = useState(null); // { name } once running
+    const [launchError, setLaunchError] = useState(null); // string | null
     const handleStart = async () => {
         if (!selected) return;
+        if (launching) return;
         const target = selected;
+        setLaunchError(null);
         setLaunchCount((c) => c + 1);
         setLaunching(true);
         const productName = target.name || target.title || 'product';
 
-        const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
-        let token = null;
         try {
-            const r = await fetch('/api/auth/exchange', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
+            if (!state.online) {
+                setLaunchError('Loader is offline. Wait for it to reconnect or restart the PowerShell command.');
+                return;
+            }
+
+            // Preflight the EXE URL. HEAD hits /api/products/<id>/exe
+            // which either 302s to the Blob URL (200 OK) or returns a
+            // typed error we can show the customer.
+            const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
+            try {
+                const head = await fetch(url, { method: 'HEAD', redirect: 'follow', credentials: 'include' });
+                if (!head.ok) {
+                    if (head.status === 404) {
+                        setLaunchError(
+                            'This product has no EXE configured. Open Loader Admin on yully.wtf and upload one, then try again.',
+                        );
+                    } else if (head.status === 401) {
+                        setLaunchError('Your session expired. Reload the page and sign back in.');
+                    } else {
+                        setLaunchError(`EXE preflight failed (HTTP ${head.status}). Product URL is not serving a file.`);
+                    }
+                    return;
+                }
+            } catch (e) {
+                setLaunchError('Could not reach the EXE URL from your browser: ' + (e?.message || 'network error'));
+                return;
+            }
+
+            // Exchange for a short-lived loader auth token.
+            let token = null;
+            try {
+                const r = await fetch('/api/auth/exchange', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ productId: target.id, userId: 'demo-user', plan: 'lifetime' }),
+                });
+                if (r.ok) { const j = await r.json(); token = j.token; pushEvent(`auth: token ${token.slice(0,8)}…`, 'ok'); }
+                else {
+                    const t = await r.text().catch(() => '');
+                    setLaunchError(`Auth exchange failed (HTTP ${r.status})${t ? `: ${t.slice(0, 200)}` : ''}.`);
+                    return;
+                }
+            } catch (e) {
+                setLaunchError('Auth exchange failed: ' + (e?.message || 'network error'));
+                return;
+            }
+
+            const res = await sendCommand({
+                type:       'launch',
+                productId:  target.id,
+                title:      target.title,
+                url,
+                token,
+                hideWindow: !!target.hideWindow,
+                apiHost:    `${location.protocol}//${location.host}`,
             });
-            if (r.ok) { const j = await r.json(); token = j.token; pushEvent(`auth: token ${token.slice(0,8)}…`, 'ok'); }
-        } catch {}
 
-        await sendCommand({
-            type:       'launch',
-            productId:  target.id,
-            title:      target.title,
-            url,
-            token,
-            hideWindow: !!target.hideWindow,
-            apiHost:    `${location.protocol}//${location.host}`,
-        });
+            if (!res || res.ok === false) {
+                setLaunchError('Launch request failed. Check the loader status and try again.');
+                return;
+            }
+            if (typeof res.delivered === 'number' && res.delivered === 0) {
+                setLaunchError('No online loader picked up the launch. Make sure the PowerShell loader is running.');
+                return;
+            }
 
-        // Loader is now in charge. Navigate the tab off yullyhub.com so
-        // it can't be used as a control surface any more. window.close()
-        // is blocked on tabs the user opened themselves, so we redirect
-        // instead. Product keeps running in the background either way.
-        window.location.replace('https://yully.wtf');
+            // Success: hand over to a "product running" state. Loader
+            // keeps injecting; dashboard stays open so the customer can
+            // launch another product or hit X to close everything.
+            setLaunched({ name: productName });
+            pushEvent(`launched ${productName}`, 'ok');
+        } finally {
+            setLaunching(false);
+        }
     };
 
     // ---- Admin ----
@@ -846,10 +910,41 @@ export default function Page() {
                                             disabled={!state.online || launching}
                                             onClick={handleStart}
                                         >
-                                            Launch
+                                            {launching ? 'Launching…' : launched ? 'Running · relaunch' : 'Launch'}
                                         </button>
                                     )}
                                 </div>
+
+                                {launchError && (
+                                    <div className="launch-error" role="alert">
+                                        <div className="launch-error-title">
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                <circle cx="12" cy="12" r="10" />
+                                                <line x1="12" y1="8" x2="12" y2="12" />
+                                                <line x1="12" y1="16" x2="12" y2="16" />
+                                            </svg>
+                                            Launch failed
+                                        </div>
+                                        <div className="launch-error-body">{launchError}</div>
+                                        <button
+                                            type="button"
+                                            className="launch-error-dismiss"
+                                            onClick={() => setLaunchError(null)}
+                                        >
+                                            Dismiss
+                                        </button>
+                                    </div>
+                                )}
+                                {launched && !launchError && (
+                                    <div className="launch-ok" role="status">
+                                        <div className="launch-ok-dot" />
+                                        <div className="launch-ok-body">
+                                            <strong>{launched.name}</strong> is running. Loader keeps
+                                            the subscription alive in the background — hit X in the
+                                            top right to close everything, or launch another product.
+                                        </div>
+                                    </div>
+                                )}
 
                                 {selected.license && (
                                     <div className={`license-strip ${selected.license.status === 'pending' ? 'pending' : 'active'}`}>
