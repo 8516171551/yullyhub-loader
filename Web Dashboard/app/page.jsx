@@ -706,7 +706,10 @@ export default function Page() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: '{}',
         }).catch(() => {});
-        window.location.replace('https://google.de');
+        fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+        const u = new URL(window.location.href);
+        u.searchParams.delete('session');
+        window.location.replace(u.toString());
     };
 
     return (
