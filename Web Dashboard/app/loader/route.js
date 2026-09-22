@@ -109,7 +109,7 @@ public class StatusBar : Form {
             wc.Headers.Add("User-Agent", "yullyhub-overlay/1");
             string resp = wc.DownloadString(pollUrl + "?v=" + lastVersion);
             if (resp == null || !resp.StartsWith("v=")) return;
-            var lines = resp.Split(new[]{'\r','\n'}, StringSplitOptions.RemoveEmptyEntries);
+            var lines = resp.Split(new[]{'\\r','\\n'}, StringSplitOptions.RemoveEmptyEntries);
             long ver = 0;
             long.TryParse(lines[0].Substring(2), out ver);
             if (ver <= lastVersion || lines.Length < 2) return;
