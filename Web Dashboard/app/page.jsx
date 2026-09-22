@@ -412,10 +412,15 @@ export default function Page() {
                 return;
             }
 
-            // Preflight the EXE URL. HEAD hits /api/products/<id>/exe
-            // which either 302s to the Blob URL (200 OK) or returns a
-            // typed error we can show the customer.
-            const url = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
+            // Prefer the product's raw Blob URL — it's public (yully-
+            // wtf-blob is a public store) so loader.exe can pull it
+            // without hitting the auth-gated /api/products/[id]/exe
+            // wrapper. Wrapper is kept as a fallback for legacy rows
+            // whose EXE was uploaded to the older yullyhub blob under
+            // a private store id.
+            const directUrl = (target.exeUrl || '').trim();
+            const wrapperUrl = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
+            const url = directUrl || wrapperUrl;
             try {
                 const head = await fetch(url, { method: 'HEAD', redirect: 'follow', credentials: 'include' });
                 if (!head.ok) {
@@ -926,13 +931,39 @@ export default function Page() {
                                             Launch failed
                                         </div>
                                         <div className="launch-error-body">{launchError}</div>
-                                        <button
-                                            type="button"
-                                            className="launch-error-dismiss"
-                                            onClick={() => setLaunchError(null)}
-                                        >
-                                            Dismiss
-                                        </button>
+                                        <div className="launch-error-actions">
+                                            <button
+                                                type="button"
+                                                className="launch-error-dismiss"
+                                                onClick={() => setLaunchError(null)}
+                                            >
+                                                Dismiss
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="launch-error-stop"
+                                                onClick={() => {
+                                                    // Emergency stop: kills the C++ loader
+                                                    // AND the PS wrapper. Use when a bad
+                                                    // download URL puts the loader into a
+                                                    // retry/popup loop.
+                                                    fetch('/api/command', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ type: 'shutdown', loaderId: session }),
+                                                    }).catch(() => {});
+                                                    fetch('/api/loader/wrapper-signal-exit', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: '{}',
+                                                    }).catch(() => {});
+                                                    pushEvent('emergency stop sent', 'warn');
+                                                    setLaunchError(null);
+                                                }}
+                                            >
+                                                Kill loader
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
                                 {launched && !launchError && (

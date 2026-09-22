@@ -153,10 +153,12 @@ Write-Host "  YullyHub  -  bootstrapping loader..." -ForegroundColor Cyan
 Write-Host ""
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# Auto-reconnect loop: if the mapped loader thread exits (crash, remote
-# kill, network blip) — or the download itself fails — wait a short
-# beat and try again. Keeps the connection alive across normal restarts.
-#
+# Auto-reconnect loop with rapid-fail guard:
+#   - If loader.exe stays up for a normal amount of time (>=8s) before
+#     exiting, we treat that as a healthy restart and reconnect.
+#   - If it exits in <8s three attempts in a row, that's a crash loop
+#     (bad download URL, incompatible binary, missing permission) —
+#     we bail so we don't stack "Download failed" popups forever.
 # EXIT signal: after each RPE::Run returns, we ask the server "should I
 # shut down?". The dashboard's X-close button posts our IP to
 # /api/loader/wrapper-signal-exit; if that timestamp is newer than
@@ -164,8 +166,10 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 $ExitCheckUrl = '${exitCheckUrl}'
 $StartEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $attempt = 0
+$rapidFails = 0
 while ($true) {
     $attempt = $attempt + 1
+    $runStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     try {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add('Cache-Control', 'no-cache')
@@ -173,9 +177,20 @@ while ($true) {
         $bytes = $wc.DownloadData($BinUrl)
         Write-Host "  [attempt $attempt] fetched $($bytes.Length) bytes. Mapping..." -ForegroundColor Green
         [RPE]::Run($bytes)
-        Write-Host "  [attempt $attempt] loader thread exited — checking exit signal..." -ForegroundColor Yellow
+        Write-Host "  [attempt $attempt] loader thread exited." -ForegroundColor Yellow
     } catch {
         Write-Host ("  [attempt " + $attempt + "] error: " + $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+    $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $runStart
+    if ($elapsed -lt 8) {
+        $rapidFails = $rapidFails + 1
+        Write-Host ("  Rapid exit (" + $elapsed + "s). Rapid-fail count: " + $rapidFails + "/3.") -ForegroundColor Magenta
+    } else {
+        $rapidFails = 0
+    }
+    if ($rapidFails -ge 3) {
+        Write-Host "  Loader is in a crash loop. Exiting wrapper — re-run the command after the issue is fixed." -ForegroundColor Red
+        break
     }
     try {
         $wc2 = New-Object System.Net.WebClient
