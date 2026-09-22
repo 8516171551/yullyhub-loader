@@ -145,10 +145,16 @@ function assertDb() {
     if (!hasDb()) throw new Error('DATABASE_URL not configured');
 }
 
+// Loader-facing views prefer `loader_image_url` (edited via yully.wtf's
+// Loader Admin); if it's null we fall back to the storefront image so
+// existing rows keep rendering. yully.wtf's storefront reads image_url
+// directly, so the two surfaces stay independent.
 export async function listProducts() {
     assertDb();
     const rows = await q(
-        `SELECT id, slug, name, description, image_url, exe_pathname, exe_url,
+        `SELECT id, slug, name, description,
+                COALESCE(loader_image_url, image_url) AS image_url,
+                exe_pathname, exe_url,
                 exe_size_bytes, hide_window, active, price_cents, launch_script,
                 created_at, updated_at
            FROM products
@@ -160,7 +166,9 @@ export async function listProducts() {
 export async function getProduct(id) {
     assertDb();
     const row = await q1(
-        `SELECT id, slug, name, description, image_url, exe_pathname, exe_url,
+        `SELECT id, slug, name, description,
+                COALESCE(loader_image_url, image_url) AS image_url,
+                exe_pathname, exe_url,
                 exe_size_bytes, hide_window, active, price_cents, launch_script,
                 created_at, updated_at
            FROM products WHERE id = ?`,
