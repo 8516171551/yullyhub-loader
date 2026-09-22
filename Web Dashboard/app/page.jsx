@@ -422,7 +422,9 @@ export default function Page() {
             const wrapperUrl = `${location.protocol}//${location.host}/api/products/${target.id}/exe`;
             const url = directUrl || wrapperUrl;
             try {
-                const head = await fetch(url, { method: 'HEAD', redirect: 'follow', credentials: 'include' });
+                const fetchOpts = { method: 'HEAD', redirect: 'follow' };
+                if (!directUrl) fetchOpts.credentials = 'include';
+                const head = await fetch(url, fetchOpts);
                 if (!head.ok) {
                     if (head.status === 404) {
                         setLaunchError(
